@@ -28,10 +28,16 @@ under the License.
 
 Paimon's write performance is closely related to checkpoint, so if you need greater write throughput:
 
-1. Increase the checkpoint interval, or just use batch mode.
+1. Flink Configuration (`'flink-conf.yaml'` or `SET` in SQL): Increase the checkpoint interval
+   (`'execution.checkpointing.interval'`), increase max concurrent checkpoints to 3
+   (`'execution.checkpointing.max-concurrent-checkpoints'`), or just use batch mode.
 2. Increase `write-buffer-size`.
 3. Enable `write-buffer-spillable`.
 4. Rescale bucket number if you are using Fixed-Bucket mode.
+
+Option `'changelog-producer' = 'lookup' or 'full-compaction'`, and option `'full-compaction.delta-commits'` have a
+large impact on write performance, if it is a snapshot / full synchronization phase you can unset these options and
+then enable them again in the incremental phase.
 
 ## Parallelism
 
@@ -58,13 +64,75 @@ It is recommended that the parallelism of sink should be less than or equal to t
     </tbody>
 </table>
 
-## Write Initialize
-
-In the initialization of write, the writer of the bucket needs to read all historical files. If there is a bottleneck
-here (For example, writing a large number of partitions simultaneously), you can use `write-manifest-cache` to cache
-the read manifest data to accelerate initialization.
-
 ## Compaction
+
+### Asynchronous Compaction
+
+Compaction is inherently asynchronous, but if you want it to be completely asynchronous and not blocking writing,
+expect a mode to have maximum write throughput, the compaction can be done slowly and not in a hurry.
+You can use the following strategies for your table:
+
+```shell
+num-sorted-run.stop-trigger = 2147483647
+sort-spill-threshold = 10
+```
+
+This configuration will generate more files during peak write periods and gradually merge into optimal read
+performance during low write periods.
+
+### Number of Sorted Runs to Pause Writing
+
+When the number of sorted runs is small, Paimon writers will perform compaction asynchronously in separated threads, so
+records can be continuously written into the table. However, to avoid unbounded growth of sorted runs, writers will
+pause writing when the number of sorted runs hits the threshold. The following table property determines
+the threshold.
+
+<table class="table table-bordered">
+    <thead>
+    <tr>
+      <th class="text-left" style="width: 20%">Option</th>
+      <th class="text-left" style="width: 5%">Required</th>
+      <th class="text-left" style="width: 5%">Default</th>
+      <th class="text-left" style="width: 10%">Type</th>
+      <th class="text-left" style="width: 60%">Description</th>
+    </tr>
+    </thead>
+    <tbody>
+    <tr>
+      <td><h5>num-sorted-run.stop-trigger</h5></td>
+      <td>No</td>
+      <td style="word-wrap: break-word;">(none)</td>
+      <td>Integer</td>
+      <td>The number of sorted runs that trigger the stopping of writes, the default value is 'num-sorted-run.compaction-trigger' + 1.</td>
+    </tr>
+    </tbody>
+</table>
+
+Write stalls will become less frequent when `num-sorted-run.stop-trigger` becomes larger, thus improving writing
+performance. However, if this value becomes too large, more memory and CPU time will be needed when querying the
+table. If you are concerned about the OOM problem, please configure the following option.
+Its value depends on your memory size.
+
+<table class="table table-bordered">
+    <thead>
+    <tr>
+      <th class="text-left" style="width: 20%">Option</th>
+      <th class="text-left" style="width: 5%">Required</th>
+      <th class="text-left" style="width: 5%">Default</th>
+      <th class="text-left" style="width: 10%">Type</th>
+      <th class="text-left" style="width: 60%">Description</th>
+    </tr>
+    </thead>
+    <tbody>
+    <tr>
+      <td><h5>sort-spill-threshold</h5></td>
+      <td>No</td>
+      <td style="word-wrap: break-word;">(none)</td>
+      <td>Integer</td>
+      <td>If the maximum number of sort readers exceeds this value, a spill will be attempted. This prevents too many readers from consuming too much memory and causing OOM.</td>
+    </tr>
+    </tbody>
+</table>
 
 ### Number of Sorted Runs to Trigger Compaction
 
@@ -95,122 +163,54 @@ One can easily see that too many sorted runs will result in poor query performan
 
 Compaction will become less frequent when `num-sorted-run.compaction-trigger` becomes larger, thus improving writing performance. However, if this value becomes too large, more memory and CPU time will be needed when querying the table. This is a trade-off between writing and query performance.
 
-### Number of Sorted Runs to Pause Writing
+## File Format
 
-When number of sorted runs is small, Paimon writers will perform compaction asynchronously in separated threads, so records can be continuously written into the table. However to avoid unbounded growth of sorted runs, writers will have to pause writing when the number of sorted runs hits the threshold. The following table property determines the threshold.
+If you want to achieve ultimate compaction performance, you can consider using row storage file format AVRO.
+- The advantage is that you can achieve high write throughput and compaction performance.
+- The disadvantage is that your analysis queries will be slow, and the biggest problem with row storage is that it
+  does not have the query projection. For example, if the table have 100 columns but only query a few columns, the
+  IO of row storage cannot be ignored. Additionally, compression efficiency will decrease and storage costs will
+  increase.
 
-<table class="table table-bordered">
-    <thead>
-    <tr>
-      <th class="text-left" style="width: 20%">Option</th>
-      <th class="text-left" style="width: 5%">Required</th>
-      <th class="text-left" style="width: 5%">Default</th>
-      <th class="text-left" style="width: 10%">Type</th>
-      <th class="text-left" style="width: 60%">Description</th>
-    </tr>
-    </thead>
-    <tbody>
-    <tr>
-      <td><h5>num-sorted-run.stop-trigger</h5></td>
-      <td>No</td>
-      <td style="word-wrap: break-word;">(none)</td>
-      <td>Integer</td>
-      <td>The number of sorted runs that trigger the stopping of writes, the default value is 'num-sorted-run.compaction-trigger' + 1.</td>
-    </tr>
-    </tbody>
-</table>
+This a tradeoff.
 
-Write stalls will become less frequent when `num-sorted-run.stop-trigger` becomes larger, thus improving writing performance. However, if this value becomes too large, more memory and CPU time will be needed when querying the table. This is a trade-off between writing and query performance.
-
-### Dedicated Compaction Job
-
-By default, Paimon writers will perform compaction as needed when writing records. This is sufficient for most use cases, but there are two downsides:
-
-* This may result in unstable write throughput because throughput might temporarily drop when performing a compaction.
-* Compaction will mark some data files as "deleted" (not really deleted, see [expiring snapshots]({{< ref "maintenance/manage-snapshots#expiring-snapshots" >}}) for more info). If multiple writers mark the same file a conflict will occur when committing the changes. Paimon will automatically resolve the conflict, but this may result in job restarts.
-
-To avoid these downsides, users can also choose to skip compactions in writers, and run a dedicated job only for compaction. As compactions are performed only by the dedicated job, writers can continuously write records without pausing and no conflicts will ever occur.
-
-To skip compactions in writers, set the following table property to `true`.
-
-<table class="table table-bordered">
-    <thead>
-    <tr>
-      <th class="text-left" style="width: 20%">Option</th>
-      <th class="text-left" style="width: 5%">Required</th>
-      <th class="text-left" style="width: 5%">Default</th>
-      <th class="text-left" style="width: 10%">Type</th>
-      <th class="text-left" style="width: 60%">Description</th>
-    </tr>
-    </thead>
-    <tbody>
-    <tr>
-      <td><h5>write-only</h5></td>
-      <td>No</td>
-      <td style="word-wrap: break-word;">false</td>
-      <td>Boolean</td>
-      <td>If set to true, compactions and snapshot expiration will be skipped. This option is used along with dedicated compact jobs.</td>
-    </tr>
-    </tbody>
-</table>
-
-To run a dedicated job for compaction, follow these instructions.
-
-{{< tabs "dedicated-compaction-job" >}}
-
-{{< tab "Flink" >}}
-
-Flink SQL currently does not support statements related to compactions, so we have to submit the compaction job through `flink run`.
-
-Run the following command to submit a compaction job for the table.
-
-```bash
-<FLINK_HOME>/bin/flink run \
-    /path/to/paimon-flink-action-{{< version >}}.jar \
-    compact \
-    --warehouse <warehouse-path> \
-    --database <database-name> \ 
-    --table <table-name> \
-    [--partition <partition-name>] \
-    [--catalog-conf <paimon-catalog-conf> [--catalog-conf <paimon-catalog-conf> ...]] \
-```
-* `--catalog-conf` is the configuration for Paimon catalog. Each configuration should be specified in the format `key=value`. See [here]({{< ref "maintenance/configurations" >}}) for a complete list of catalog configurations.
-
-If you submit a batch job (set `execution.runtime-mode: batch` in Flink's configuration), all current table files will be compacted. If you submit a streaming job (set `execution.runtime-mode: streaming` in Flink's configuration), the job will continuously monitor new changes to the table and perform compactions as needed.
-
-{{< hint info >}}
-
-If you only want to submit the compaction job and don't want to wait until the job is done, you should submit in [detached mode](https://nightlies.apache.org/flink/flink-docs-stable/docs/deployment/cli/#submitting-a-job).
-
-{{< /hint >}}
-
-Example
-
-```bash
-<FLINK_HOME>/bin/flink run \
-    /path/to/paimon-flink-action-{{< version >}}.jar \
-    compact \
-    --warehouse s3:///path/to/warehouse \
-    --database test_db \
-    --table test_table \
-    --partition dt=20221126,hh=08 \
-    --partition dt=20221127,hh=09 \
-    --catalog-conf s3.endpoint=https://****.com \
-    --catalog-conf s3.access-key=***** \
-    --catalog-conf s3.secret-key=*****
+Enable row storage through the following options:
+```shell
+file.format = avro
+metadata.stats-mode = none
 ```
 
-For more usage of the compact action, see
+The collection of statistical information for row storage is a bit expensive, so I suggest turning off statistical
+information as well.
 
-```bash
-<FLINK_HOME>/bin/flink run \
-    /path/to/paimon-flink-action-{{< version >}}.jar \
-    compact --help
+If you don't want to modify all files to Avro format, at least you can consider modifying the files in the previous
+layers to Avro format. You can use `'file.format.per.level' = '0:avro,1:avro'` to specify the files in the first two
+layers to be in Avro format.
+
+## File Compression
+
+By default, Paimon uses high-performance compression algorithms such as LZ4 and SNAPPY, but their compression rates
+are not so good. If you want to reduce the write/read performance, you can modify the compression algorithm:
+
+1. `'file.compression'`: Default file compression format. If you need a higher compression rate, I recommend using `'ZSTD'`.
+2. `'file.compression.per.level'`: Define different compression policies for different level. For example `'0:lz4,1:zstd'`.
+
+## Stability
+
+If there are too few buckets or resources, full-compaction may cause the checkpoint timeout, Flink's default
+checkpoint timeout is 10 minutes.
+
+If you expect stability even in this case, you can turn up the checkpoint timeout, for example:
+
+```shell
+execution.checkpointing.timeout = 60 min
 ```
 
-{{< /tab >}}
+## Write Initialize
 
-{{< /tabs >}}
+In the initialization of write, the writer of the bucket needs to read all historical files. If there is a bottleneck
+here (For example, writing a large number of partitions simultaneously), you can use `write-manifest-cache` to cache
+the read manifest data to accelerate initialization.
 
 ## Memory
 
@@ -218,5 +218,10 @@ There are three main places in Paimon writer that takes up memory:
 
 * Writer's memory buffer, shared and preempted by all writers of a single task. This memory value can be adjusted by the `write-buffer-size` table property.
 * Memory consumed when merging several sorted runs for compaction. Can be adjusted by the `num-sorted-run.compaction-trigger` option to change the number of sorted runs to be merged.
-* If the row is very large, reading too many lines of data at once can consume a lot of memory when making a compaction. Reducing the `read.batch-size` option can alleviate the impact of this case.
-* The memory consumed by writing columnar (ORC, Parquet, etc.) file, which is not adjustable.
+* If the row is very large, reading too many lines of data at once will consume a lot of memory when making a compaction. Reducing the `read.batch-size` option can alleviate the impact of this case.
+* The memory consumed by writing columnar (ORC, Parquet, etc.) file. Decreasing the `orc.write.batch-size` option can reduce the consumption of memory for ORC format.
+
+If your Flink job does not rely on state, please avoid using managed memory, which you can control with the following Flink parameter:
+```shell
+taskmanager.memory.managed.size=1m
+```

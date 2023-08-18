@@ -22,20 +22,18 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.manifest.ManifestCommittable;
 import org.apache.paimon.manifest.WrappedManifestCommittable;
-import org.apache.paimon.operation.Lock;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.CommitMessage;
 
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.metrics.groups.OperatorIOMetricGroup;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.stream.Collectors;
 
 /**
@@ -46,46 +44,17 @@ import java.util.stream.Collectors;
 public class StoreMultiCommitter
         implements Committer<MultiTableCommittable, WrappedManifestCommittable> {
 
-    private Catalog catalog;
+    private final Catalog catalog;
     private final String commitUser;
     // To make the commit behavior consistent with that of Committer,
     //    StoreMultiCommitter manages multiple committers which are
     //    referenced by table id.
-    private Map<Identifier, StoreCommitter> tableCommitters;
-    private Lock.Factory lockFactory = Lock.emptyFactory();
+    private final Map<Identifier, StoreCommitter> tableCommitters;
 
     public StoreMultiCommitter(String commitUser, Catalog.Loader catalogLoader) {
         this.catalog = catalogLoader.load();
         this.commitUser = commitUser;
         this.tableCommitters = new HashMap<>();
-    }
-
-    @Override
-    public List<WrappedManifestCommittable> filterRecoveredCommittables(
-            List<WrappedManifestCommittable> globalCommittables) {
-        // key by table id
-        Map<Identifier, List<ManifestCommittable>> committableMap =
-                groupByTable(globalCommittables);
-
-        Map<Long, WrappedManifestCommittable> result = new TreeMap<>();
-
-        for (Map.Entry<Identifier, List<ManifestCommittable>> entry : committableMap.entrySet()) {
-            Identifier tableId = entry.getKey();
-            List<ManifestCommittable> committableList = entry.getValue();
-            StoreCommitter committer = getStoreCommitter(tableId);
-            List<ManifestCommittable> filteredCommittables =
-                    committer.filterRecoveredCommittables(committableList);
-
-            for (ManifestCommittable filteredCommittable : filteredCommittables) {
-                long identifier = filteredCommittable.identifier();
-                WrappedManifestCommittable wrappedFilteredCommittable =
-                        result.computeIfAbsent(identifier, id -> new WrappedManifestCommittable());
-
-                wrappedFilteredCommittable.putManifestCommittable(tableId, filteredCommittable);
-            }
-        }
-
-        return new LinkedList<>(result.values());
     }
 
     @Override
@@ -116,7 +85,8 @@ public class StoreMultiCommitter
     }
 
     @Override
-    public void commit(List<WrappedManifestCommittable> committables)
+    public void commit(
+            List<WrappedManifestCommittable> committables, OperatorIOMetricGroup metricGroup)
             throws IOException, InterruptedException {
 
         // key by table id
@@ -126,8 +96,19 @@ public class StoreMultiCommitter
             Identifier tableId = entry.getKey();
             List<ManifestCommittable> committableList = entry.getValue();
             StoreCommitter committer = getStoreCommitter(tableId);
-            committer.commit(committableList);
+            committer.commit(committableList, metricGroup);
         }
+    }
+
+    @Override
+    public int filterAndCommit(List<WrappedManifestCommittable> globalCommittables)
+            throws IOException {
+        int result = 0;
+        for (Map.Entry<Identifier, List<ManifestCommittable>> entry :
+                groupByTable(globalCommittables).entrySet()) {
+            result += getStoreCommitter(entry.getKey()).filterAndCommit(entry.getValue());
+        }
+        return result;
     }
 
     private Map<Identifier, List<ManifestCommittable>> groupByTable(
@@ -168,11 +149,7 @@ public class StoreMultiCommitter
                                 "Failed to get committer for table %s", tableId.getFullName()),
                         e);
             }
-            committer =
-                    new StoreCommitter(
-                            table.newCommit(commitUser)
-                                    .withLock(lockFactory.create())
-                                    .ignoreEmptyCommit(false));
+            committer = new StoreCommitter(table.newCommit(commitUser).ignoreEmptyCommit(false));
             tableCommitters.put(tableId, committer);
         }
 

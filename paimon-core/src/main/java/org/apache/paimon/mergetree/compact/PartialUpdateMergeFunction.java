@@ -33,9 +33,15 @@ import javax.annotation.Nullable;
 
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
+import static org.apache.paimon.CoreOptions.FIELDS_PREFIX;
 import static org.apache.paimon.utils.InternalRowUtils.createFieldGetters;
 
 /**
@@ -44,14 +50,15 @@ import static org.apache.paimon.utils.InternalRowUtils.createFieldGetters;
  */
 public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
 
-    public static final String FIELDS = "fields";
     public static final String SEQUENCE_GROUP = "sequence-group";
 
     private final InternalRow.FieldGetter[] getters;
     private final boolean ignoreDelete;
     private final Map<Integer, SequenceGenerator> fieldSequences;
 
-    private KeyValue latestKv;
+    private InternalRow currentKey;
+    private long latestSequenceNumber;
+    private boolean isEmpty;
     private GenericRow row;
     private KeyValue reused;
 
@@ -66,27 +73,39 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
 
     @Override
     public void reset() {
-        this.latestKv = null;
+        this.currentKey = null;
         this.row = new GenericRow(getters.length);
+        this.isEmpty = true;
     }
 
     @Override
     public void add(KeyValue kv) {
-        if (kv.valueKind() == RowKind.UPDATE_BEFORE || kv.valueKind() == RowKind.DELETE) {
+        // refresh key object to avoid reference overwritten
+        currentKey = kv.key();
+
+        // ignore delete?
+        if (kv.valueKind().isRetract()) {
             if (ignoreDelete) {
                 return;
             }
 
-            if (kv.valueKind() == RowKind.UPDATE_BEFORE) {
-                throw new IllegalArgumentException(
-                        "Partial update can not accept update_before records, it is a bug.");
+            if (fieldSequences.size() > 1) {
+                retractWithSequenceGroup(kv);
+                return;
             }
 
-            throw new IllegalArgumentException(
-                    "Partial update can not accept delete records. Partial delete is not supported!");
+            String msg =
+                    String.join(
+                            "By default, Partial update can not accept delete records,"
+                                    + " you can choose one of the following solutions:",
+                            "1. Configure 'partial-update.ignore-delete' to ignore delete records.",
+                            "2. Configure 'sequence-group's to retract partial columns.");
+
+            throw new IllegalArgumentException(msg);
         }
 
-        latestKv = kv;
+        latestSequenceNumber = kv.sequenceNumber();
+        isEmpty = false;
         if (fieldSequences.isEmpty()) {
             updateNonNullFields(kv);
         } else {
@@ -123,22 +142,38 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
         }
     }
 
+    private void retractWithSequenceGroup(KeyValue kv) {
+        for (int i = 0; i < getters.length; i++) {
+            SequenceGenerator sequenceGen = fieldSequences.get(i);
+            if (sequenceGen != null) {
+                Long currentSeq = sequenceGen.generateNullable(kv.value());
+                if (currentSeq != null) {
+                    Long previousSeq = sequenceGen.generateNullable(row);
+                    if (previousSeq == null || currentSeq >= previousSeq) {
+                        if (sequenceGen.index() == i) {
+                            // update sequence field
+                            row.setField(i, getters[i].getFieldOrNull(kv.value()));
+                        } else {
+                            // retract normal field
+                            row.setField(i, null);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     @Override
     @Nullable
     public KeyValue getResult() {
-        if (latestKv == null) {
-            if (ignoreDelete) {
-                return null;
-            }
-
-            throw new IllegalArgumentException(
-                    "Trying to get result from merge function without any input. This is unexpected.");
+        if (isEmpty) {
+            return null;
         }
 
         if (reused == null) {
             reused = new KeyValue();
         }
-        return reused.replace(latestKv.key(), latestKv.sequenceNumber(), RowKind.INSERT, row);
+        return reused.replace(currentKey, latestSequenceNumber, RowKind.INSERT, row);
     }
 
     public static MergeFunctionFactory<KeyValue> factory(Options options, RowType rowType) {
@@ -162,10 +197,11 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
             for (Map.Entry<String, String> entry : options.toMap().entrySet()) {
                 String k = entry.getKey();
                 String v = entry.getValue();
-                if (k.startsWith(FIELDS) && k.endsWith(SEQUENCE_GROUP)) {
+                if (k.startsWith(FIELDS_PREFIX) && k.endsWith(SEQUENCE_GROUP)) {
                     String sequenceFieldName =
                             k.substring(
-                                    FIELDS.length() + 1, k.length() - SEQUENCE_GROUP.length() - 1);
+                                    FIELDS_PREFIX.length() + 1,
+                                    k.length() - SEQUENCE_GROUP.length() - 1);
                     SequenceGenerator sequenceGen =
                             new SequenceGenerator(sequenceFieldName, rowType);
                     Arrays.stream(v.split(","))
@@ -189,13 +225,39 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
 
         @Override
         public MergeFunction<KeyValue> create(@Nullable int[][] projection) {
-            List<DataType> fieldTypes = tableTypes;
             if (projection != null) {
-                fieldTypes = Projection.of(projection).project(tableTypes);
+                Map<Integer, SequenceGenerator> projectedSequences = new HashMap<>();
+                int[] projects = Projection.of(projection).toTopLevelIndexes();
+                Map<Integer, Integer> indexMap = new HashMap<>();
+                for (int i = 0; i < projects.length; i++) {
+                    indexMap.put(projects[i], i);
+                }
+                fieldSequences.forEach(
+                        (field, sequence) -> {
+                            int newField = indexMap.getOrDefault(field, -1);
+                            if (newField != -1) {
+                                int newSequenceId = indexMap.getOrDefault(sequence.index(), -1);
+                                if (newSequenceId == -1) {
+                                    throw new RuntimeException(
+                                            String.format(
+                                                    "Can not find new sequence field for new field. new field index is %s",
+                                                    newField));
+                                } else {
+                                    projectedSequences.put(
+                                            newField,
+                                            new SequenceGenerator(
+                                                    newSequenceId, sequence.fieldType()));
+                                }
+                            }
+                        });
+                return new PartialUpdateMergeFunction(
+                        createFieldGetters(Projection.of(projection).project(tableTypes)),
+                        ignoreDelete,
+                        projectedSequences);
+            } else {
+                return new PartialUpdateMergeFunction(
+                        createFieldGetters(tableTypes), ignoreDelete, fieldSequences);
             }
-            InternalRow.FieldGetter[] fieldGetters = createFieldGetters(fieldTypes);
-
-            return new PartialUpdateMergeFunction(fieldGetters, ignoreDelete, fieldSequences);
         }
 
         @Override
@@ -203,8 +265,30 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
             if (fieldSequences.isEmpty()) {
                 return new AdjustedProjection(projection, null);
             }
-            // TODO implement this, just keep required fields and adjust fieldSequences too.
-            return new AdjustedProjection(null, projection);
+
+            if (projection == null) {
+                return new AdjustedProjection(null, null);
+            }
+            LinkedHashSet<Integer> extraFields = new LinkedHashSet<>();
+            int[] topProjects = Projection.of(projection).toTopLevelIndexes();
+            Set<Integer> indexSet = Arrays.stream(topProjects).boxed().collect(Collectors.toSet());
+            for (int index : topProjects) {
+                SequenceGenerator generator = fieldSequences.get(index);
+                if (generator != null && !indexSet.contains(generator.index())) {
+                    extraFields.add(generator.index());
+                }
+            }
+
+            int[] allProjects =
+                    Stream.concat(Arrays.stream(topProjects).boxed(), extraFields.stream())
+                            .mapToInt(Integer::intValue)
+                            .toArray();
+
+            int[][] pushdown = Projection.of(allProjects).toNestedIndexes();
+            int[][] outer =
+                    Projection.of(IntStream.range(0, topProjects.length).toArray())
+                            .toNestedIndexes();
+            return new AdjustedProjection(pushdown, outer);
         }
     }
 }

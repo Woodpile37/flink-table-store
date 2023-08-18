@@ -24,12 +24,14 @@ import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.memory.MemorySegmentPool;
 import org.apache.paimon.operation.AbstractFileStoreWrite;
 import org.apache.paimon.operation.FileStoreWrite;
 import org.apache.paimon.utils.Restorable;
 
 import java.util.List;
+import java.util.concurrent.ExecutorService;
 
 import static org.apache.paimon.utils.Preconditions.checkState;
 
@@ -63,6 +65,12 @@ public class TableWriteImpl<T>
     }
 
     @Override
+    public TableWriteImpl<T> isStreamingMode(boolean isStreamingMode) {
+        write.isStreamingMode(isStreamingMode);
+        return this;
+    }
+
+    @Override
     public TableWriteImpl<T> withIOManager(IOManager ioManager) {
         write.withIOManager(ioManager);
         return this;
@@ -71,6 +79,16 @@ public class TableWriteImpl<T>
     @Override
     public TableWriteImpl<T> withMemoryPool(MemorySegmentPool memoryPool) {
         write.withMemoryPool(memoryPool);
+        return this;
+    }
+
+    public TableWriteImpl<T> withMemoryPoolFactory(MemoryPoolFactory memoryPoolFactory) {
+        write.withMemoryPoolFactory(memoryPoolFactory);
+        return this;
+    }
+
+    public TableWriteImpl<T> withCompactExecutor(ExecutorService compactExecutor) {
+        write.withCompactExecutor(compactExecutor);
         return this;
     }
 
@@ -105,7 +123,7 @@ public class TableWriteImpl<T>
         return data;
     }
 
-    private SinkRecord toSinkRecord(InternalRow row) throws Exception {
+    private SinkRecord toSinkRecord(InternalRow row) {
         keyAndBucketExtractor.setRecord(row);
         return new SinkRecord(
                 keyAndBucketExtractor.partition(),
@@ -165,6 +183,11 @@ public class TableWriteImpl<T>
     @Override
     public void restore(List<AbstractFileStoreWrite.State<T>> state) {
         write.restore(state);
+    }
+
+    @VisibleForTesting
+    public AbstractFileStoreWrite<T> getWrite() {
+        return write;
     }
 
     /** Extractor to extract {@link T} from the {@link SinkRecord}. */

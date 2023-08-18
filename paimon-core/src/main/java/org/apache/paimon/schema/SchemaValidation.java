@@ -19,7 +19,11 @@
 package org.apache.paimon.schema;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.CoreOptions.ChangelogProducer;
 import org.apache.paimon.WriteMode;
+import org.apache.paimon.casting.CastExecutor;
+import org.apache.paimon.casting.CastExecutors;
+import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.format.FileFormat;
 import org.apache.paimon.options.ConfigOption;
 import org.apache.paimon.options.Options;
@@ -29,18 +33,24 @@ import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.MapType;
 import org.apache.paimon.types.MultisetType;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.types.VarCharType;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 import static org.apache.paimon.CoreOptions.BUCKET_KEY;
 import static org.apache.paimon.CoreOptions.CHANGELOG_PRODUCER;
+import static org.apache.paimon.CoreOptions.INCREMENTAL_BETWEEN;
+import static org.apache.paimon.CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP;
 import static org.apache.paimon.CoreOptions.SCAN_MODE;
 import static org.apache.paimon.CoreOptions.SCAN_SNAPSHOT_ID;
+import static org.apache.paimon.CoreOptions.SCAN_TAG_NAME;
 import static org.apache.paimon.CoreOptions.SCAN_TIMESTAMP_MILLIS;
 import static org.apache.paimon.CoreOptions.SNAPSHOT_NUM_RETAINED_MAX;
 import static org.apache.paimon.CoreOptions.SNAPSHOT_NUM_RETAINED_MIN;
@@ -68,25 +78,27 @@ public class SchemaValidation {
         validatePrimaryKeysType(schema.fields(), schema.primaryKeys());
 
         CoreOptions options = new CoreOptions(schema.options());
-        if (options.startupMode() == CoreOptions.StartupMode.FROM_TIMESTAMP) {
-            checkOptionExistInMode(
-                    options, SCAN_TIMESTAMP_MILLIS, CoreOptions.StartupMode.FROM_TIMESTAMP);
-            checkOptionsConflict(options, SCAN_SNAPSHOT_ID, SCAN_TIMESTAMP_MILLIS);
-        } else if (options.startupMode() == CoreOptions.StartupMode.FROM_SNAPSHOT
-                || options.startupMode() == CoreOptions.StartupMode.FROM_SNAPSHOT_FULL) {
-            checkOptionExistInMode(options, SCAN_SNAPSHOT_ID, options.startupMode());
-            checkOptionsConflict(options, SCAN_TIMESTAMP_MILLIS, SCAN_SNAPSHOT_ID);
-        } else {
-            checkOptionNotExistInMode(options, SCAN_TIMESTAMP_MILLIS, options.startupMode());
-            checkOptionNotExistInMode(options, SCAN_SNAPSHOT_ID, options.startupMode());
-        }
 
+        validateDefaultValues(schema);
+
+        validateStartupMode(options);
+
+        ChangelogProducer changelogProducer = options.changelogProducer();
         if (options.writeMode() == WriteMode.APPEND_ONLY
-                && options.changelogProducer() != CoreOptions.ChangelogProducer.NONE) {
+                && changelogProducer != ChangelogProducer.NONE) {
             throw new UnsupportedOperationException(
                     String.format(
                             "Can not set the %s to %s and %s at the same time.",
                             WRITE_MODE.key(), APPEND_ONLY, CHANGELOG_PRODUCER.key()));
+        }
+
+        if (options.writeMode() == WriteMode.AUTO
+                && schema.primaryKeys().isEmpty()
+                && changelogProducer != ChangelogProducer.NONE) {
+            throw new UnsupportedOperationException(
+                    String.format(
+                            "Can not set %s on table without primary keys, please define primary keys.",
+                            CHANGELOG_PRODUCER.key()));
         }
 
         checkArgument(
@@ -98,16 +110,16 @@ public class SchemaValidation {
                         + " should not be larger than "
                         + SNAPSHOT_NUM_RETAINED_MAX.key());
 
-        // Only changelog tables with primary keys support full compaction or lookup changelog
-        // producer
+        // Only changelog tables with primary keys support full compaction or lookup
+        // changelog producer
         if (options.writeMode() == WriteMode.CHANGE_LOG) {
-            switch (options.changelogProducer()) {
+            switch (changelogProducer) {
                 case FULL_COMPACTION:
                 case LOOKUP:
                     if (schema.primaryKeys().isEmpty()) {
                         throw new UnsupportedOperationException(
                                 "Changelog table with "
-                                        + options.changelogProducer()
+                                        + changelogProducer
                                         + " must have primary keys");
                     }
                     break;
@@ -169,6 +181,27 @@ public class SchemaValidation {
                                 schema.fieldNames().contains(field),
                                 "Nonexistent sequence field: '%s'",
                                 field));
+
+        CoreOptions.MergeEngine mergeEngine = options.mergeEngine();
+        if (mergeEngine == CoreOptions.MergeEngine.FIRST_ROW) {
+            if (sequenceField.isPresent()) {
+                throw new IllegalArgumentException(
+                        "Do not support use sequence field on FIRST_MERGE merge engine");
+            }
+
+            if (changelogProducer != ChangelogProducer.LOOKUP) {
+                throw new IllegalArgumentException(
+                        "Only support 'lookup' changelog-producer on FIRST_MERGE merge engine");
+            }
+        }
+
+        if (schema.crossPartitionUpdate() && options.bucket() != -1) {
+            throw new IllegalArgumentException(
+                    String.format(
+                            "You should use dynamic bucket (bucket = -1) mode in cross partition update case "
+                                    + "(Primary key constraint %s not include all partition fields %s).",
+                            schema.primaryKeys(), schema.partitionKeys()));
+        }
     }
 
     private static void validatePrimaryKeysType(List<DataField> fields, List<String> primaryKeys) {
@@ -191,6 +224,58 @@ public class SchemaValidation {
         }
     }
 
+    private static void validateStartupMode(CoreOptions options) {
+        if (options.startupMode() == CoreOptions.StartupMode.FROM_TIMESTAMP) {
+            checkOptionExistInMode(
+                    options, SCAN_TIMESTAMP_MILLIS, CoreOptions.StartupMode.FROM_TIMESTAMP);
+            checkOptionsConflict(
+                    options,
+                    Arrays.asList(
+                            SCAN_SNAPSHOT_ID,
+                            SCAN_TAG_NAME,
+                            INCREMENTAL_BETWEEN_TIMESTAMP,
+                            INCREMENTAL_BETWEEN),
+                    Collections.singletonList(SCAN_TIMESTAMP_MILLIS));
+        } else if (options.startupMode() == CoreOptions.StartupMode.FROM_SNAPSHOT) {
+            checkExactOneOptionExistInMode(
+                    options, options.startupMode(), SCAN_SNAPSHOT_ID, SCAN_TAG_NAME);
+            checkOptionsConflict(
+                    options,
+                    Arrays.asList(
+                            SCAN_TIMESTAMP_MILLIS,
+                            INCREMENTAL_BETWEEN_TIMESTAMP,
+                            INCREMENTAL_BETWEEN),
+                    Arrays.asList(SCAN_SNAPSHOT_ID, SCAN_TAG_NAME));
+        } else if (options.startupMode() == CoreOptions.StartupMode.INCREMENTAL) {
+            checkExactOneOptionExistInMode(
+                    options,
+                    options.startupMode(),
+                    INCREMENTAL_BETWEEN,
+                    INCREMENTAL_BETWEEN_TIMESTAMP);
+            checkOptionsConflict(
+                    options,
+                    Arrays.asList(SCAN_SNAPSHOT_ID, SCAN_TIMESTAMP_MILLIS, SCAN_TAG_NAME),
+                    Arrays.asList(INCREMENTAL_BETWEEN, INCREMENTAL_BETWEEN_TIMESTAMP));
+        } else if (options.startupMode() == CoreOptions.StartupMode.FROM_SNAPSHOT_FULL) {
+            checkOptionExistInMode(options, SCAN_SNAPSHOT_ID, options.startupMode());
+            checkOptionsConflict(
+                    options,
+                    Arrays.asList(
+                            SCAN_TIMESTAMP_MILLIS,
+                            SCAN_TAG_NAME,
+                            INCREMENTAL_BETWEEN_TIMESTAMP,
+                            INCREMENTAL_BETWEEN),
+                    Collections.singletonList(SCAN_SNAPSHOT_ID));
+        } else {
+            checkOptionNotExistInMode(options, SCAN_TIMESTAMP_MILLIS, options.startupMode());
+            checkOptionNotExistInMode(options, SCAN_SNAPSHOT_ID, options.startupMode());
+            checkOptionNotExistInMode(options, SCAN_TAG_NAME, options.startupMode());
+            checkOptionNotExistInMode(
+                    options, INCREMENTAL_BETWEEN_TIMESTAMP, options.startupMode());
+            checkOptionNotExistInMode(options, INCREMENTAL_BETWEEN, options.startupMode());
+        }
+    }
+
     private static void checkOptionExistInMode(
             CoreOptions options, ConfigOption<?> option, CoreOptions.StartupMode startupMode) {
         checkArgument(
@@ -209,11 +294,94 @@ public class SchemaValidation {
                         option.key(), startupMode, SCAN_MODE.key()));
     }
 
-    private static void checkOptionsConflict(
-            CoreOptions options, ConfigOption<?> illegalOption, ConfigOption<?> legalOption) {
+    private static void checkExactOneOptionExistInMode(
+            CoreOptions options,
+            CoreOptions.StartupMode startupMode,
+            ConfigOption<?>... configOptions) {
         checkArgument(
-                !options.toConfiguration().contains(illegalOption),
+                Arrays.stream(configOptions)
+                                .filter(op -> options.toConfiguration().contains(op))
+                                .count()
+                        == 1,
                 String.format(
-                        "%s must be null when you set %s", illegalOption.key(), legalOption.key()));
+                        "must set only one key in [%s] when you use %s for %s",
+                        concatConfigKeys(Arrays.asList(configOptions)),
+                        startupMode,
+                        SCAN_MODE.key()));
+    }
+
+    private static void checkOptionsConflict(
+            CoreOptions options,
+            List<ConfigOption<?>> illegalOptions,
+            List<ConfigOption<?>> legalOptions) {
+        for (ConfigOption<?> illegalOption : illegalOptions) {
+            checkArgument(
+                    !options.toConfiguration().contains(illegalOption),
+                    "[%s] must be null when you set [%s]",
+                    illegalOption.key(),
+                    concatConfigKeys(legalOptions));
+        }
+    }
+
+    private static String concatConfigKeys(List<ConfigOption<?>> configOptions) {
+        return configOptions.stream().map(ConfigOption::key).collect(Collectors.joining(","));
+    }
+
+    private static void validateDefaultValues(TableSchema schema) {
+        CoreOptions coreOptions = new CoreOptions(schema.options());
+        Map<String, String> defaultValues = coreOptions.getFieldDefaultValues();
+
+        if (!defaultValues.isEmpty()) {
+
+            List<String> partitionKeys = schema.partitionKeys();
+            for (String partitionKey : partitionKeys) {
+                if (defaultValues.containsKey(partitionKey)) {
+                    throw new IllegalArgumentException(
+                            String.format(
+                                    "Partition key %s should not be assign default column.",
+                                    partitionKey));
+                }
+            }
+
+            List<String> primaryKeys = schema.primaryKeys();
+            for (String primaryKey : primaryKeys) {
+                if (defaultValues.containsKey(primaryKey)) {
+                    throw new IllegalArgumentException(
+                            String.format(
+                                    "Primary key %s should not be assign default column.",
+                                    primaryKey));
+                }
+            }
+
+            List<DataField> fields = schema.fields();
+
+            for (DataField field : fields) {
+                String defaultValueStr = defaultValues.get(field.name());
+                if (defaultValueStr == null) {
+                    continue;
+                }
+
+                @SuppressWarnings("unchecked")
+                CastExecutor<Object, Object> resolve =
+                        (CastExecutor<Object, Object>)
+                                CastExecutors.resolve(VarCharType.STRING_TYPE, field.type());
+                if (resolve == null) {
+                    throw new IllegalArgumentException(
+                            String.format(
+                                    "The column %s with datatype %s is currently not supported for default value.",
+                                    field.name(), field.type().asSQLString()));
+                }
+
+                try {
+                    resolve.cast(BinaryString.fromString(defaultValueStr));
+                } catch (Exception e) {
+                    throw new IllegalArgumentException(
+                            String.format(
+                                    "The default value %s of the column %s can not be cast to datatype: %s",
+                                    defaultValueStr, field.name(), field.type()),
+                            e);
+                }
+            }
+        }
     }
 }

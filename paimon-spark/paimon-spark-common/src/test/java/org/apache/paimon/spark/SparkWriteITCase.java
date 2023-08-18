@@ -79,6 +79,14 @@ public class SparkWriteITCase {
         innerSimpleWrite();
     }
 
+    @Test
+    public void testSortSpill() {
+        spark.sql(
+                "CREATE TABLE T (a INT, b INT, c STRING) TBLPROPERTIES"
+                        + " ('primary-key'='a', 'bucket'='4', 'file.format'='avro', 'sort-spill-threshold'='2')");
+        innerSimpleWrite();
+    }
+
     private void innerSimpleWrite() {
         spark.sql("INSERT INTO T VALUES (1, 2, '3')").collectAsList();
         List<Row> rows = spark.sql("SELECT * FROM T").collectAsList();
@@ -147,5 +155,42 @@ public class SparkWriteITCase {
                                 "SELECT partition, max(bucket) FROM `T$FILES` GROUP BY partition ORDER BY partition")
                         .collectAsList();
         assertThat(rows.toString()).isEqualTo("[[[1],2], [[2],0]]");
+    }
+
+    @Test
+    public void testReadWriteUnawareBucketTable() {
+        spark.sql(
+                "CREATE TABLE T (a INT, b INT, c STRING) PARTITIONED BY (a) TBLPROPERTIES"
+                        + " ('write-mode'='append-only', 'bucket'='-1')");
+
+        spark.sql("INSERT INTO T VALUES (1, 1, '1'), (1, 2, '2')");
+        spark.sql("INSERT INTO T VALUES (1, 1, '1'), (1, 2, '2')");
+        spark.sql("INSERT INTO T VALUES (2, 1, '1'), (2, 2, '2')");
+        spark.sql("INSERT INTO T VALUES (2, 1, '1'), (2, 2, '2')");
+        spark.sql("INSERT INTO T VALUES (3, 1, '1'), (3, 2, '2')");
+        spark.sql("INSERT INTO T VALUES (3, 1, '1'), (3, 2, '2')");
+
+        List<Row> rows = spark.sql("SELECT count(1) FROM T").collectAsList();
+        assertThat(rows.toString()).isEqualTo("[[12]]");
+
+        rows = spark.sql("SELECT * FROM T WHERE b = 2 AND a = 1").collectAsList();
+        assertThat(rows.toString()).isEqualTo("[[1,2,2], [1,2,2]]");
+
+        rows = spark.sql("SELECT max(bucket) FROM `T$FILES`").collectAsList();
+        assertThat(rows.toString()).isEqualTo("[[0]]");
+    }
+
+    @Test
+    public void testNonnull() {
+        try {
+            spark.sql("CREATE TABLE S AS SELECT 1 as a, 2 as b, 'yann' as c");
+
+            spark.sql("CREATE TABLE T (a INT NOT NULL, b INT, c STRING)");
+            spark.sql("INSERT INTO T SELECT * FROM S");
+            List<Row> rows = spark.sql("SELECT * FROM T").collectAsList();
+            assertThat(rows.toString()).isEqualTo("[[1,2,yann]]");
+        } finally {
+            spark.sql("DROP TABLE IF EXISTS S");
+        }
     }
 }

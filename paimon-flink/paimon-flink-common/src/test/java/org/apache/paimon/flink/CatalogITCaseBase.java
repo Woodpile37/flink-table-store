@@ -19,9 +19,11 @@
 package org.apache.paimon.flink;
 
 import org.apache.paimon.Snapshot;
+import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.util.AbstractTestBase;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.local.LocalFileIO;
+import org.apache.paimon.table.Table;
 import org.apache.paimon.utils.BlockingIterator;
 import org.apache.paimon.utils.SnapshotManager;
 
@@ -49,7 +51,10 @@ import java.io.File;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.apache.flink.streaming.api.environment.ExecutionCheckpointingOptions.CHECKPOINTING_INTERVAL;
 
@@ -67,14 +72,17 @@ public abstract class CatalogITCaseBase extends AbstractTestBase {
         path = getTempDirPath();
         String inferScan =
                 !inferScanParallelism() ? ",\n'table-default.scan.infer-parallelism'='false'" : "";
+
+        Map<String, String> options = new HashMap<>(catalogOptions());
+        options.put("type", "paimon");
+        options.put("warehouse", toWarehouse(path));
         tEnv.executeSql(
                 String.format(
-                        "CREATE CATALOG %s WITH ("
-                                + "'type'='paimon', 'warehouse'='%s'"
-                                + inferScan
-                                + ")",
+                        "CREATE CATALOG %s WITH (" + "%s" + inferScan + ")",
                         catalog,
-                        path));
+                        options.entrySet().stream()
+                                .map(e -> String.format("'%s'='%s'", e.getKey(), e.getValue()))
+                                .collect(Collectors.joining(","))));
         tEnv.useCatalog(catalog);
 
         sEnv = TableEnvironment.create(EnvironmentSettings.newInstance().inStreamingMode().build());
@@ -84,6 +92,10 @@ public abstract class CatalogITCaseBase extends AbstractTestBase {
 
         setParallelism(defaultParallelism());
         prepareEnv();
+    }
+
+    protected Map<String, String> catalogOptions() {
+        return Collections.emptyMap();
     }
 
     protected boolean inferScanParallelism() {
@@ -141,10 +153,20 @@ public abstract class CatalogITCaseBase extends AbstractTestBase {
     }
 
     protected CatalogTable table(String tableName) throws TableNotExistException {
-        Catalog catalog = tEnv.getCatalog(tEnv.getCurrentCatalog()).get();
+        Catalog catalog = flinkCatalog();
         CatalogBaseTable table =
                 catalog.getTable(new ObjectPath(catalog.getDefaultDatabase(), tableName));
         return (CatalogTable) table;
+    }
+
+    protected Table paimonTable(String tableName)
+            throws org.apache.paimon.catalog.Catalog.TableNotExistException {
+        org.apache.paimon.catalog.Catalog catalog = flinkCatalog().catalog();
+        return catalog.getTable(Identifier.create(tEnv.getCurrentDatabase(), tableName));
+    }
+
+    private FlinkCatalog flinkCatalog() {
+        return (FlinkCatalog) tEnv.getCatalog(tEnv.getCurrentCatalog()).get();
     }
 
     protected Path getTableDirectory(String tableName) {
@@ -159,5 +181,17 @@ public abstract class CatalogITCaseBase extends AbstractTestBase {
                 new SnapshotManager(LocalFileIO.create(), getTableDirectory(tableName));
         Long id = snapshotManager.latestSnapshotId();
         return id == null ? null : snapshotManager.snapshot(id);
+    }
+
+    @Nullable
+    protected Snapshot findSnapshot(String tableName, long snapshotId) {
+        SnapshotManager snapshotManager =
+                new SnapshotManager(LocalFileIO.create(), getTableDirectory(tableName));
+        Long id = snapshotManager.latestSnapshotId();
+        return id == null ? null : id >= snapshotId ? snapshotManager.snapshot(snapshotId) : null;
+    }
+
+    protected String toWarehouse(String path) {
+        return path;
     }
 }

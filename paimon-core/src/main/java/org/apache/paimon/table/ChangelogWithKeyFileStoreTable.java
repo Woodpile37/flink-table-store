@@ -20,6 +20,7 @@ package org.apache.paimon.table;
 
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.CoreOptions.ChangelogProducer;
+import org.apache.paimon.CoreOptions.SequenceAutoPadding;
 import org.apache.paimon.KeyValue;
 import org.apache.paimon.KeyValueFileStore;
 import org.apache.paimon.WriteMode;
@@ -28,12 +29,14 @@ import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.manifest.ManifestCacheFilter;
 import org.apache.paimon.mergetree.compact.DeduplicateMergeFunction;
+import org.apache.paimon.mergetree.compact.FirstRowMergeFunction;
 import org.apache.paimon.mergetree.compact.LookupMergeFunction;
 import org.apache.paimon.mergetree.compact.MergeFunctionFactory;
 import org.apache.paimon.mergetree.compact.PartialUpdateMergeFunction;
 import org.apache.paimon.mergetree.compact.aggregate.AggregateMergeFunction;
 import org.apache.paimon.operation.FileStoreScan;
 import org.apache.paimon.operation.KeyValueFileStoreScan;
+import org.apache.paimon.operation.Lock;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.reader.RecordReader;
@@ -66,12 +69,20 @@ public class ChangelogWithKeyFileStoreTable extends AbstractFileStoreTable {
     private transient KeyValueFileStore lazyStore;
 
     ChangelogWithKeyFileStoreTable(FileIO fileIO, Path path, TableSchema tableSchema) {
-        super(fileIO, path, tableSchema);
+        this(fileIO, path, tableSchema, new CatalogEnvironment(Lock.emptyFactory(), null, null));
+    }
+
+    ChangelogWithKeyFileStoreTable(
+            FileIO fileIO,
+            Path path,
+            TableSchema tableSchema,
+            CatalogEnvironment catalogEnvironment) {
+        super(fileIO, path, tableSchema, catalogEnvironment);
     }
 
     @Override
     protected FileStoreTable copy(TableSchema newTableSchema) {
-        return new ChangelogWithKeyFileStoreTable(fileIO, path, newTableSchema);
+        return new ChangelogWithKeyFileStoreTable(fileIO, path, newTableSchema, catalogEnvironment);
     }
 
     @Override
@@ -81,7 +92,10 @@ public class ChangelogWithKeyFileStoreTable extends AbstractFileStoreTable {
             Options conf = Options.fromMap(tableSchema.options());
             CoreOptions options = new CoreOptions(conf);
             CoreOptions.MergeEngine mergeEngine = options.mergeEngine();
+            KeyValueFieldsExtractor extractor = ChangelogWithKeyKeyValueFieldsExtractor.EXTRACTOR;
+
             MergeFunctionFactory<KeyValue> mfFactory;
+
             switch (mergeEngine) {
                 case DEDUPLICATE:
                     mfFactory = DeduplicateMergeFunction.factory();
@@ -97,21 +111,28 @@ public class ChangelogWithKeyFileStoreTable extends AbstractFileStoreTable {
                                     rowType.getFieldTypes(),
                                     tableSchema.primaryKeys());
                     break;
+                case FIRST_ROW:
+                    mfFactory =
+                            FirstRowMergeFunction.factory(
+                                    new RowType(extractor.keyFields(tableSchema)), rowType);
+                    break;
                 default:
                     throw new UnsupportedOperationException(
                             "Unsupported merge engine: " + mergeEngine);
             }
 
             if (options.changelogProducer() == ChangelogProducer.LOOKUP) {
-                mfFactory = LookupMergeFunction.wrap(mfFactory);
+                mfFactory =
+                        LookupMergeFunction.wrap(
+                                mfFactory, new RowType(extractor.keyFields(tableSchema)), rowType);
             }
 
-            KeyValueFieldsExtractor extractor = ChangelogWithKeyKeyValueFieldsExtractor.EXTRACTOR;
             lazyStore =
                     new KeyValueFileStore(
                             fileIO(),
                             schemaManager(),
                             tableSchema.id(),
+                            tableSchema.crossPartitionUpdate(),
                             options,
                             tableSchema.logicalPartitionType(),
                             addKeyNamePrefix(tableSchema.logicalBucketKeyType()),
@@ -186,7 +207,7 @@ public class ChangelogWithKeyFileStoreTable extends AbstractFileStoreTable {
     }
 
     @Override
-    public InnerTableRead newRead() {
+    public InnerTableRead innerRead() {
         return new KeyValueTableRead(store().newRead()) {
 
             @Override
@@ -206,6 +227,12 @@ public class ChangelogWithKeyFileStoreTable extends AbstractFileStoreTable {
                     RecordReader.RecordIterator<KeyValue> kvRecordIterator) {
                 return new ValueContentRowDataRecordIterator(kvRecordIterator);
             }
+
+            @Override
+            public InnerTableRead forceKeepDelete() {
+                read.forceKeepDelete();
+                return this;
+            }
         };
     }
 
@@ -222,8 +249,10 @@ public class ChangelogWithKeyFileStoreTable extends AbstractFileStoreTable {
                         .sequenceField()
                         .map(field -> new SequenceGenerator(field, schema().logicalRowType()))
                         .orElse(null);
-        final CoreOptions.SequenceAutoPadding sequenceAutoPadding =
-                store().options().sequenceAutoPadding();
+        final List<SequenceAutoPadding> sequenceAutoPadding =
+                store().options().sequenceAutoPadding().stream()
+                        .map(SequenceAutoPadding::fromString)
+                        .collect(Collectors.toList());
         final KeyValue kv = new KeyValue();
         return new TableWriteImpl<>(
                 store().newWrite(commitUser, manifestFilter),
@@ -232,7 +261,7 @@ public class ChangelogWithKeyFileStoreTable extends AbstractFileStoreTable {
                     long sequenceNumber =
                             sequenceGenerator == null
                                     ? KeyValue.UNKNOWN_SEQUENCE
-                                    : sequenceAutoPadding == CoreOptions.SequenceAutoPadding.NONE
+                                    : sequenceAutoPadding.isEmpty()
                                             ? sequenceGenerator.generate(record.row())
                                             : sequenceGenerator.generateWithPadding(
                                                     record.row(), sequenceAutoPadding);

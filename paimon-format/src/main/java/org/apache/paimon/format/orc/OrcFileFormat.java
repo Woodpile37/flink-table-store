@@ -22,17 +22,18 @@ import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.format.FileFormat;
 import org.apache.paimon.format.FileFormatFactory.FormatContext;
-import org.apache.paimon.format.FileStatsExtractor;
 import org.apache.paimon.format.FormatReaderFactory;
 import org.apache.paimon.format.FormatWriterFactory;
-import org.apache.paimon.format.orc.filter.OrcFileStatsExtractor;
+import org.apache.paimon.format.TableStatsExtractor;
 import org.apache.paimon.format.orc.filter.OrcFilters;
 import org.apache.paimon.format.orc.filter.OrcPredicateFunctionVisitor;
+import org.apache.paimon.format.orc.filter.OrcTableStatsExtractor;
 import org.apache.paimon.format.orc.reader.OrcSplitReaderUtil;
 import org.apache.paimon.format.orc.writer.RowDataVectorizer;
 import org.apache.paimon.format.orc.writer.Vectorizer;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.Predicate;
+import org.apache.paimon.statistics.FieldStatsCollector;
 import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
@@ -72,6 +73,7 @@ public class OrcFileFormat extends FileFormat {
         this.readerConf = new org.apache.hadoop.conf.Configuration();
         this.orcProperties.forEach((k, v) -> readerConf.set(k.toString(), v.toString()));
         this.writerConf = new org.apache.hadoop.conf.Configuration();
+        this.orcProperties.forEach((k, v) -> writerConf.set(k.toString(), v.toString()));
         this.formatContext = formatContext;
     }
 
@@ -86,8 +88,9 @@ public class OrcFileFormat extends FileFormat {
     }
 
     @Override
-    public Optional<FileStatsExtractor> createStatsExtractor(RowType type) {
-        return Optional.of(new OrcFileStatsExtractor(type));
+    public Optional<TableStatsExtractor> createStatsExtractor(
+            RowType type, FieldStatsCollector.Factory[] statsCollectors) {
+        return Optional.of(new OrcTableStatsExtractor(type, statsCollectors));
     }
 
     @Override

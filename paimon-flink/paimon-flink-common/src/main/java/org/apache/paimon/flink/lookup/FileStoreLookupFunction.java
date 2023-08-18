@@ -28,6 +28,7 @@ import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.PredicateFilter;
 import org.apache.paimon.reader.RecordReaderIterator;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.source.OutOfRangeException;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.FileIOUtils;
 import org.apache.paimon.utils.TypeUtils;
@@ -60,7 +61,6 @@ import java.util.stream.IntStream;
 
 import static org.apache.paimon.flink.RocksDBOptions.LOOKUP_CACHE_ROWS;
 import static org.apache.paimon.predicate.PredicateBuilder.transformFieldMapping;
-import static org.apache.paimon.utils.Preconditions.checkArgument;
 
 /** A lookup {@link TableFunction} for file store. */
 public class FileStoreLookupFunction implements Serializable, Closeable {
@@ -85,11 +85,6 @@ public class FileStoreLookupFunction implements Serializable, Closeable {
 
     public FileStoreLookupFunction(
             Table table, int[] projection, int[] joinKeyIndex, @Nullable Predicate predicate) {
-        checkArgument(
-                table.primaryKeys().size() > 0,
-                String.format(
-                        "Currently only support primary key table, the lookup table is [%s].",
-                        table.name()));
         TableScanUtils.streamingReadingValidate(table);
 
         this.table = table;
@@ -123,7 +118,10 @@ public class FileStoreLookupFunction implements Serializable, Closeable {
     // we tag this method friendly for testing
     void open(String tmpDirectory) throws Exception {
         this.path = new File(tmpDirectory, "lookup-" + UUID.randomUUID());
+        open();
+    }
 
+    private void open() throws Exception {
         Options options = Options.fromMap(table.options());
         this.refreshInterval = options.get(CoreOptions.CONTINUOUS_DISCOVERY_INTERVAL);
         this.stateFactory = new RocksDBStateFactory(path.toString(), options);
@@ -173,6 +171,18 @@ public class FileStoreLookupFunction implements Serializable, Closeable {
                 rows.add(new FlinkRowData(matchedRow));
             }
             return rows;
+        } catch (OutOfRangeException e) {
+            reopen();
+            return lookup(keyRow);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void reopen() {
+        try {
+            close();
+            open();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -221,12 +231,24 @@ public class FileStoreLookupFunction implements Serializable, Closeable {
         try {
             Field field = context.getClass().getDeclaredField("context");
             field.setAccessible(true);
-            StreamingRuntimeContext runtimeContext = (StreamingRuntimeContext) field.get(context);
+            StreamingRuntimeContext runtimeContext =
+                    extractStreamingRuntimeContext(field.get(context));
             String[] tmpDirectories =
                     runtimeContext.getTaskManagerRuntimeInfo().getTmpDirectories();
             return tmpDirectories[ThreadLocalRandom.current().nextInt(tmpDirectories.length)];
         } catch (NoSuchFieldException | IllegalAccessException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static StreamingRuntimeContext extractStreamingRuntimeContext(Object runtimeContext)
+            throws NoSuchFieldException, IllegalAccessException {
+        if (runtimeContext instanceof StreamingRuntimeContext) {
+            return (StreamingRuntimeContext) runtimeContext;
+        }
+
+        Field field = runtimeContext.getClass().getDeclaredField("runtimeContext");
+        field.setAccessible(true);
+        return extractStreamingRuntimeContext(field.get(runtimeContext));
     }
 }

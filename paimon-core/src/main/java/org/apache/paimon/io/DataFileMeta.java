@@ -30,6 +30,8 @@ import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.IntType;
 import org.apache.paimon.types.RowType;
 
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -115,7 +117,7 @@ public class DataFileMeta {
                 schemaId,
                 level,
                 Collections.emptyList(),
-                Timestamp.fromEpochMillis(System.currentTimeMillis()));
+                Timestamp.fromLocalDateTime(LocalDateTime.now()));
     }
 
     public DataFileMeta(
@@ -210,6 +212,14 @@ public class DataFileMeta {
 
     public Timestamp creationTime() {
         return creationTime;
+    }
+
+    public long creationTimeEpochMillis() {
+        return creationTime
+                .toLocalDateTime()
+                .atZone(ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli();
     }
 
     public DataFileMeta upgrade(int newLevel) {

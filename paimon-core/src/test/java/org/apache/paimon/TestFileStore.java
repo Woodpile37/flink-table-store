@@ -52,6 +52,7 @@ import org.apache.paimon.utils.CommitIncrement;
 import org.apache.paimon.utils.FileStorePathFactory;
 import org.apache.paimon.utils.RecordWriter;
 import org.apache.paimon.utils.SnapshotManager;
+import org.apache.paimon.utils.TagManager;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -104,6 +105,7 @@ public class TestFileStore extends KeyValueFileStore {
                 FileIOFinder.find(new Path(root)),
                 new SchemaManager(FileIOFinder.find(new Path(root)), options.path()),
                 0L,
+                false,
                 options,
                 partitionType,
                 keyType,
@@ -131,15 +133,12 @@ public class TestFileStore extends KeyValueFileStore {
     public FileStoreExpireImpl newExpire(
             int numRetainedMin, int numRetainedMax, long millisRetained) {
         return new FileStoreExpireImpl(
-                fileIO,
                 numRetainedMin,
                 numRetainedMax,
                 millisRetained,
-                pathFactory(),
                 snapshotManager(),
-                newIndexFileHandler(),
-                manifestFileFactory(),
-                manifestListFactory());
+                newSnapshotDeletion(),
+                new TagManager(fileIO, options.path()));
     }
 
     public List<Snapshot> commitData(
@@ -351,7 +350,7 @@ public class TestFileStore extends KeyValueFileStore {
     }
 
     public List<KeyValue> readKvsFromManifestEntries(
-            List<ManifestEntry> entries, boolean isIncremental) throws Exception {
+            List<ManifestEntry> entries, boolean isStreaming) throws Exception {
         if (LOG.isDebugEnabled()) {
             for (ManifestEntry entry : entries) {
                 LOG.debug("reading from " + entry.toString());
@@ -376,12 +375,12 @@ public class TestFileStore extends KeyValueFileStore {
                 RecordReaderIterator<KeyValue> iterator =
                         new RecordReaderIterator<>(
                                 read.createReader(
-                                        new DataSplit(
-                                                0L /* unused */,
-                                                entryWithPartition.getKey(),
-                                                entryWithBucket.getKey(),
-                                                entryWithBucket.getValue(),
-                                                isIncremental)));
+                                        DataSplit.builder()
+                                                .withPartition(entryWithPartition.getKey())
+                                                .withBucket(entryWithBucket.getKey())
+                                                .withDataFiles(entryWithBucket.getValue())
+                                                .isStreaming(isStreaming)
+                                                .build()));
                 while (iterator.hasNext()) {
                     kvs.add(iterator.next().copy(keySerializer, valueSerializer));
                 }

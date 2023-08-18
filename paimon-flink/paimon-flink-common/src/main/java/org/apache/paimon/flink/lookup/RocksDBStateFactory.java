@@ -18,7 +18,6 @@
 
 package org.apache.paimon.flink.lookup;
 
-import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.serializer.Serializer;
 import org.apache.paimon.flink.RocksDBOptions;
 
@@ -37,6 +36,8 @@ import java.nio.charset.StandardCharsets;
 /** Factory to create state. */
 public class RocksDBStateFactory implements Closeable {
 
+    public static final String MERGE_OPERATOR_NAME = "stringappendtest";
+
     private RocksDB db;
 
     private final ColumnFamilyOptions columnFamilyOptions;
@@ -51,7 +52,8 @@ public class RocksDBStateFactory implements Closeable {
                                 .setCreateIfMissing(true),
                         conf);
         this.columnFamilyOptions =
-                RocksDBOptions.createColumnOptions(new ColumnFamilyOptions(), conf);
+                RocksDBOptions.createColumnOptions(new ColumnFamilyOptions(), conf)
+                        .setMergeOperatorName(MERGE_OPERATOR_NAME);
 
         try {
             this.db = RocksDB.open(new Options(dbOptions, columnFamilyOptions), path);
@@ -60,23 +62,34 @@ public class RocksDBStateFactory implements Closeable {
         }
     }
 
-    public RocksDBValueState valueState(
+    public <K, V> RocksDBValueState<K, V> valueState(
             String name,
-            Serializer<InternalRow> keySerializer,
-            Serializer<InternalRow> valueSerializer,
+            Serializer<K> keySerializer,
+            Serializer<V> valueSerializer,
             long lruCacheSize)
             throws IOException {
-        return new RocksDBValueState(
+        return new RocksDBValueState<>(
                 db, createColumnFamily(name), keySerializer, valueSerializer, lruCacheSize);
     }
 
-    public RocksDBSetState setState(
+    public <K, V> RocksDBSetState<K, V> setState(
             String name,
-            Serializer<InternalRow> keySerializer,
-            Serializer<InternalRow> valueSerializer,
+            Serializer<K> keySerializer,
+            Serializer<V> valueSerializer,
             long lruCacheSize)
             throws IOException {
-        return new RocksDBSetState(
+        return new RocksDBSetState<>(
+                db, createColumnFamily(name), keySerializer, valueSerializer, lruCacheSize);
+    }
+
+    public <K, V> RocksDBListState<K, V> listState(
+            String name,
+            Serializer<K> keySerializer,
+            Serializer<V> valueSerializer,
+            long lruCacheSize)
+            throws IOException {
+
+        return new RocksDBListState<>(
                 db, createColumnFamily(name), keySerializer, valueSerializer, lruCacheSize);
     }
 

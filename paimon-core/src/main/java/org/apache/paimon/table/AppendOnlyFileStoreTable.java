@@ -22,6 +22,7 @@ import org.apache.paimon.AppendOnlyFileStore;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.WriteMode;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.manifest.ManifestCacheFilter;
@@ -29,7 +30,7 @@ import org.apache.paimon.operation.AppendOnlyFileStoreRead;
 import org.apache.paimon.operation.AppendOnlyFileStoreScan;
 import org.apache.paimon.operation.AppendOnlyFileStoreWrite;
 import org.apache.paimon.operation.FileStoreScan;
-import org.apache.paimon.operation.ReverseReader;
+import org.apache.paimon.operation.Lock;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.schema.TableSchema;
@@ -39,6 +40,7 @@ import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.InnerTableRead;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.source.SplitGenerator;
+import org.apache.paimon.table.source.TableRead;
 import org.apache.paimon.types.RowKind;
 import org.apache.paimon.utils.Preconditions;
 
@@ -53,12 +55,20 @@ public class AppendOnlyFileStoreTable extends AbstractFileStoreTable {
     private transient AppendOnlyFileStore lazyStore;
 
     AppendOnlyFileStoreTable(FileIO fileIO, Path path, TableSchema tableSchema) {
-        super(fileIO, path, tableSchema);
+        this(fileIO, path, tableSchema, new CatalogEnvironment(Lock.emptyFactory(), null, null));
+    }
+
+    AppendOnlyFileStoreTable(
+            FileIO fileIO,
+            Path path,
+            TableSchema tableSchema,
+            CatalogEnvironment catalogEnvironment) {
+        super(fileIO, path, tableSchema, catalogEnvironment);
     }
 
     @Override
     protected FileStoreTable copy(TableSchema newTableSchema) {
-        return new AppendOnlyFileStoreTable(fileIO, path, newTableSchema);
+        return new AppendOnlyFileStoreTable(fileIO, path, newTableSchema, catalogEnvironment);
     }
 
     @Override
@@ -80,14 +90,14 @@ public class AppendOnlyFileStoreTable extends AbstractFileStoreTable {
     @Override
     public SplitGenerator splitGenerator() {
         return new AppendOnlySplitGenerator(
-                store().options().splitTargetSize(), store().options().splitOpenFileCost());
+                store().options().splitTargetSize(),
+                store().options().splitOpenFileCost(),
+                bucketMode());
     }
 
     /**
      * Currently, the streaming read of overwrite is implemented by reversing the {@link RowKind} of
      * overwrote records to {@link RowKind#DELETE}, so only tables that have primary key support it.
-     *
-     * @see ReverseReader
      */
     @Override
     public boolean supportStreamingReadOverwrite() {
@@ -100,7 +110,7 @@ public class AppendOnlyFileStoreTable extends AbstractFileStoreTable {
     }
 
     @Override
-    public InnerTableRead newRead() {
+    public InnerTableRead innerRead() {
         AppendOnlyFileStoreRead read = store().newRead();
         return new InnerTableRead() {
             @Override
@@ -112,6 +122,11 @@ public class AppendOnlyFileStoreTable extends AbstractFileStoreTable {
             @Override
             public InnerTableRead withProjection(int[][] projection) {
                 read.withProjection(projection);
+                return this;
+            }
+
+            @Override
+            public TableRead withIOManager(IOManager ioManager) {
                 return this;
             }
 
@@ -130,12 +145,9 @@ public class AppendOnlyFileStoreTable extends AbstractFileStoreTable {
     @Override
     public TableWriteImpl<InternalRow> newWrite(
             String commitUser, ManifestCacheFilter manifestFilter) {
-        AppendOnlyFileStoreWrite writer = store().newWrite(commitUser, manifestFilter);
-        // if this table is non-bucket table, we skip compaction and restored files searching
-        if (bucketMode() == BucketMode.UNAWARE) {
-            writer.skipCompaction();
-            writer.withIgnorePreviousFiles(true);
-        }
+        // if this table is unaware-bucket table, we skip compaction and restored files searching
+        AppendOnlyFileStoreWrite writer =
+                store().newWrite(commitUser, manifestFilter).withBucketMode(bucketMode());
         return new TableWriteImpl<>(
                 writer,
                 createRowKeyExtractor(),

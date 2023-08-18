@@ -18,8 +18,11 @@
 
 package org.apache.paimon.flink.log;
 
+import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.factories.Factory;
+import org.apache.paimon.factories.FactoryUtil;
 import org.apache.paimon.flink.factories.FlinkFactoryUtil.FlinkTableFactoryHelper;
-import org.apache.paimon.flink.factories.LogStoreFactoryUtil;
+import org.apache.paimon.options.Options;
 
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.serialization.SerializationSchema;
@@ -51,16 +54,7 @@ import static org.apache.paimon.CoreOptions.LOG_KEY_FORMAT;
  * <p>Log tables are for processing only unbounded data. Support streaming reading and streaming
  * writing.
  */
-public interface LogStoreTableFactory {
-
-    /**
-     * Returns a unique identifier among same factory interfaces.
-     *
-     * <p>For consistency, an identifier should be declared as one lower case word (e.g. {@code
-     * kafka}). If multiple factories exist for different versions, a version should be appended
-     * using "-" (e.g. {@code elasticsearch-7}).
-     */
-    String factoryIdentifier();
+public interface LogStoreTableFactory extends Factory {
 
     /**
      * Creates a {@link LogSourceProvider} instance from a {@link CatalogTable} and additional
@@ -77,6 +71,21 @@ public interface LogStoreTableFactory {
      */
     LogSinkProvider createSinkProvider(Context context, DynamicTableSink.Context sinkContext);
 
+    /**
+     * Creates a {@link LogStoreRegister} instance for table ddl, it will register table to log
+     * store when a table is created or dropped.
+     */
+    LogStoreRegister createRegister(RegisterContext context);
+
+    /** Context to create log store register. */
+    interface RegisterContext {
+        /** Options for the table. */
+        Options getOptions();
+
+        /** Identifier for the table. */
+        Identifier getIdentifier();
+    }
+
     // --------------------------------------------------------------------------------------------
 
     static ConfigOption<String> logKeyFormat() {
@@ -92,8 +101,7 @@ public interface LogStoreTableFactory {
     }
 
     static LogStoreTableFactory discoverLogStoreFactory(ClassLoader cl, String identifier) {
-        return LogStoreFactoryUtil.discoverLogStoreFactory(
-                cl, LogStoreTableFactory.class, identifier);
+        return FactoryUtil.discoverFactory(cl, LogStoreTableFactory.class, identifier);
     }
 
     static DecodingFormat<DeserializationSchema<RowData>> getKeyDecodingFormat(

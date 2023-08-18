@@ -41,6 +41,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import static org.apache.paimon.testutils.assertj.AssertionUtils.anyCauseMatches;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
@@ -207,7 +208,24 @@ public abstract class CatalogTestBase {
         catalog.createDatabase("test_db", false);
         // Create table creates a new table when it does not exist
         Identifier identifier = Identifier.create("test_db", "new_table");
-        catalog.createTable(identifier, DEFAULT_TABLE_SCHEMA, false);
+        Schema schema =
+                Schema.newBuilder()
+                        .column("pk1", DataTypes.INT())
+                        .column("pk2", DataTypes.STRING())
+                        .column("pk3", DataTypes.STRING())
+                        .column(
+                                "col1",
+                                DataTypes.ROW(
+                                        DataTypes.STRING(),
+                                        DataTypes.BIGINT(),
+                                        DataTypes.TIMESTAMP(),
+                                        DataTypes.ARRAY(DataTypes.STRING())))
+                        .column("col2", DataTypes.MAP(DataTypes.STRING(), DataTypes.BIGINT()))
+                        .column("col3", DataTypes.ARRAY(DataTypes.ROW(DataTypes.STRING())))
+                        .partitionKeys("pk1", "pk2")
+                        .primaryKey("pk1", "pk2", "pk3")
+                        .build();
+        catalog.createTable(identifier, schema, false);
         boolean exists = catalog.tableExists(identifier);
         assertThat(exists).isTrue();
 
@@ -468,8 +486,10 @@ public abstract class CatalogTestBase {
                                         Lists.newArrayList(
                                                 SchemaChange.addColumn("col1", DataTypes.INT())),
                                         false))
-                .hasRootCauseInstanceOf(Catalog.ColumnAlreadyExistException.class)
-                .hasRootCauseMessage("Column col1 already exists in the test_db.test_table table.");
+                .satisfies(
+                        anyCauseMatches(
+                                Catalog.ColumnAlreadyExistException.class,
+                                "Column col1 already exists in the test_db.test_table table."));
     }
 
     @Test
@@ -506,8 +526,10 @@ public abstract class CatalogTestBase {
                                         Lists.newArrayList(
                                                 SchemaChange.renameColumn("col1", "new_col1")),
                                         false))
-                .hasRootCauseInstanceOf(Catalog.ColumnAlreadyExistException.class)
-                .hasRootCauseMessage("Column col1 already exists in the test_db.test_table table.");
+                .satisfies(
+                        anyCauseMatches(
+                                Catalog.ColumnAlreadyExistException.class,
+                                "Column col1 already exists in the test_db.test_table table."));
 
         // Alter table renames a column throws ColumnNotExistException when column does not exist
         assertThatThrownBy(
@@ -518,9 +540,10 @@ public abstract class CatalogTestBase {
                                                 SchemaChange.renameColumn(
                                                         "non_existing_col", "new_col2")),
                                         false))
-                .hasRootCauseInstanceOf(Catalog.ColumnNotExistException.class)
-                .hasRootCauseMessage(
-                        "Column [non_existing_col] does not exist in the test_db.test_table table.");
+                .satisfies(
+                        anyCauseMatches(
+                                Catalog.ColumnNotExistException.class,
+                                "Column [non_existing_col] does not exist in the test_db.test_table table."));
     }
 
     @Test
@@ -553,8 +576,9 @@ public abstract class CatalogTestBase {
                                         identifier,
                                         Lists.newArrayList(SchemaChange.dropColumn("col2")),
                                         false))
-                .hasRootCauseInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining(" Cannot drop all fields in table");
+                .satisfies(
+                        anyCauseMatches(
+                                IllegalArgumentException.class, "Cannot drop all fields in table"));
 
         // Alter table drop a column throws ColumnNotExistException when column does not exist
         assertThatThrownBy(
@@ -564,9 +588,10 @@ public abstract class CatalogTestBase {
                                         Lists.newArrayList(
                                                 SchemaChange.dropColumn("non_existing_col")),
                                         false))
-                .hasRootCauseInstanceOf(Catalog.ColumnNotExistException.class)
-                .hasRootCauseMessage(
-                        "Column non_existing_col does not exist in the test_db.test_table table.");
+                .satisfies(
+                        anyCauseMatches(
+                                Catalog.ColumnNotExistException.class,
+                                "Column non_existing_col does not exist in the test_db.test_table table."));
     }
 
     @Test
@@ -580,7 +605,7 @@ public abstract class CatalogTestBase {
                 new Schema(
                         Lists.newArrayList(
                                 new DataField(0, "dt", DataTypes.STRING()),
-                                new DataField(1, "col1", DataTypes.BIGINT())),
+                                new DataField(1, "col1", DataTypes.BIGINT(), "col1 field")),
                         Lists.newArrayList("dt"),
                         Collections.emptyList(),
                         Maps.newHashMap(),
@@ -594,6 +619,7 @@ public abstract class CatalogTestBase {
 
         assertThat(table.rowType().getFieldIndex("col1")).isEqualTo(1);
         assertThat(table.rowType().getTypeAt(1)).isEqualTo(DataTypes.DOUBLE());
+        assertThat(table.rowType().getFields().get(1).description()).isEqualTo("col1 field");
 
         // Alter table update a column type throws Exception when column data type does not support
         // cast
@@ -605,9 +631,10 @@ public abstract class CatalogTestBase {
                                                 SchemaChange.updateColumnType(
                                                         "col1", DataTypes.DATE())),
                                         false))
-                .hasRootCauseInstanceOf(IllegalStateException.class)
-                .hasMessageContaining(
-                        "Column type col1[DOUBLE] cannot be converted to DATE without loosing information.");
+                .satisfies(
+                        anyCauseMatches(
+                                IllegalStateException.class,
+                                "Column type col1[DOUBLE] cannot be converted to DATE without loosing information."));
 
         // Alter table update a column type throws ColumnNotExistException when column does not
         // exist
@@ -619,9 +646,10 @@ public abstract class CatalogTestBase {
                                                 SchemaChange.updateColumnType(
                                                         "non_existing_col", DataTypes.INT())),
                                         false))
-                .hasRootCauseInstanceOf(Catalog.ColumnNotExistException.class)
-                .hasRootCauseMessage(
-                        "Column [non_existing_col] does not exist in the test_db.test_table table.");
+                .satisfies(
+                        anyCauseMatches(
+                                Catalog.ColumnNotExistException.class,
+                                "Column [non_existing_col] does not exist in the test_db.test_table table."));
         // Alter table update a column type throws Exception when column is partition columns
         assertThatThrownBy(
                         () ->
@@ -631,8 +659,10 @@ public abstract class CatalogTestBase {
                                                 SchemaChange.updateColumnType(
                                                         "dt", DataTypes.DATE())),
                                         false))
-                .hasRootCauseInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Cannot update partition column [dt] type in the table");
+                .satisfies(
+                        anyCauseMatches(
+                                IllegalArgumentException.class,
+                                "Cannot update partition column [dt] type in the table"));
     }
 
     @Test
@@ -687,9 +717,10 @@ public abstract class CatalogTestBase {
                                                 SchemaChange.updateColumnComment(
                                                         new String[] {"non_existing_col"}, "")),
                                         false))
-                .hasRootCauseInstanceOf(Catalog.ColumnNotExistException.class)
-                .hasMessageContaining(
-                        "Column [non_existing_col] does not exist in the test_db.test_table table.");
+                .satisfies(
+                        anyCauseMatches(
+                                Catalog.ColumnNotExistException.class,
+                                "Column [non_existing_col] does not exist in the test_db.test_table table."));
     }
 
     @Test
@@ -742,9 +773,10 @@ public abstract class CatalogTestBase {
                                                 SchemaChange.updateColumnNullability(
                                                         new String[] {"non_existing_col"}, false)),
                                         false))
-                .hasRootCauseInstanceOf(Catalog.ColumnNotExistException.class)
-                .hasMessageContaining(
-                        "Column [non_existing_col] does not exist in the test_db.test_table table.");
+                .satisfies(
+                        anyCauseMatches(
+                                Catalog.ColumnNotExistException.class,
+                                "Column [non_existing_col] does not exist in the test_db.test_table table."));
 
         // Alter table update a column nullability throws Exception when column is pk columns
         assertThatThrownBy(
@@ -755,7 +787,9 @@ public abstract class CatalogTestBase {
                                                 SchemaChange.updateColumnNullability(
                                                         new String[] {"col2"}, true)),
                                         false))
-                .hasRootCauseInstanceOf(UnsupportedOperationException.class)
-                .hasMessageContaining("Cannot change nullability of primary key");
+                .satisfies(
+                        anyCauseMatches(
+                                UnsupportedOperationException.class,
+                                "Cannot change nullability of primary key"));
     }
 }

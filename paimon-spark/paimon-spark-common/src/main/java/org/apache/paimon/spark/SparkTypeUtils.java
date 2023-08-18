@@ -50,7 +50,6 @@ import org.apache.spark.sql.types.UserDefinedType;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /** Utils for spark {@link DataType}. */
 public class SparkTypeUtils {
@@ -168,13 +167,16 @@ public class SparkTypeUtils {
                     mapType.getValueType().isNullable());
         }
 
+        /**
+         * For simplicity, as a temporary solution, we directly convert the non-null attribute to
+         * nullable on the Spark side.
+         */
         @Override
         public DataType visit(RowType rowType) {
             List<StructField> fields = new ArrayList<>(rowType.getFieldCount());
             for (DataField field : rowType.getFields()) {
                 StructField structField =
-                        DataTypes.createStructField(
-                                field.name(), field.type().accept(this), field.type().isNullable());
+                        DataTypes.createStructField(field.name(), field.type().accept(this), true);
                 structField =
                         Optional.ofNullable(field.description())
                                 .map(structField::withComment)
@@ -191,8 +193,6 @@ public class SparkTypeUtils {
     }
 
     private static class SparkToPaimonTypeVisitor {
-
-        private final AtomicInteger currentIndex = new AtomicInteger(0);
 
         static org.apache.paimon.types.DataType visit(DataType type) {
             return visit(type, new SparkToPaimonTypeVisitor());
@@ -241,9 +241,7 @@ public class SparkTypeUtils {
                 org.apache.paimon.types.DataType fieldType =
                         fieldResults.get(i).copy(field.nullable());
                 String comment = field.getComment().getOrElse(() -> null);
-                newFields.add(
-                        new DataField(
-                                currentIndex.getAndIncrement(), field.name(), fieldType, comment));
+                newFields.add(new DataField(i, field.name(), fieldType, comment));
             }
 
             return new RowType(newFields);

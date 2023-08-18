@@ -24,16 +24,20 @@ import org.apache.paimon.operation.FileStoreCommit;
 import org.apache.paimon.operation.FileStoreExpire;
 import org.apache.paimon.operation.Lock;
 import org.apache.paimon.operation.PartitionExpire;
+import org.apache.paimon.tag.TagAutoCreation;
+import org.apache.paimon.utils.IOUtils;
 
 import javax.annotation.Nullable;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.apache.paimon.utils.Preconditions.checkState;
 
@@ -44,25 +48,43 @@ import static org.apache.paimon.utils.Preconditions.checkState;
 public class TableCommitImpl implements InnerTableCommit {
 
     private final FileStoreCommit commit;
+    private final List<CommitCallback> commitCallbacks;
     @Nullable private final FileStoreExpire expire;
     @Nullable private final PartitionExpire partitionExpire;
+    @Nullable private final TagAutoCreation tagAutoCreation;
+    private final Lock lock;
+
     @Nullable private final Duration consumerExpireTime;
     private final ConsumerManager consumerManager;
 
     @Nullable private Map<String, String> overwritePartition = null;
-    @Nullable private Lock lock;
 
     private boolean batchCommitted = false;
 
     public TableCommitImpl(
             FileStoreCommit commit,
+            List<CommitCallback> commitCallbacks,
             @Nullable FileStoreExpire expire,
             @Nullable PartitionExpire partitionExpire,
+            @Nullable TagAutoCreation tagAutoCreation,
+            Lock lock,
             @Nullable Duration consumerExpireTime,
             ConsumerManager consumerManager) {
+        commit.withLock(lock);
+        if (expire != null) {
+            expire.withLock(lock);
+        }
+        if (partitionExpire != null) {
+            partitionExpire.withLock(lock);
+        }
+
         this.commit = commit;
+        this.commitCallbacks = commitCallbacks;
         this.expire = expire;
         this.partitionExpire = partitionExpire;
+        this.tagAutoCreation = tagAutoCreation;
+        this.lock = lock;
+
         this.consumerExpireTime = consumerExpireTime;
         this.consumerManager = consumerManager;
     }
@@ -70,22 +92,6 @@ public class TableCommitImpl implements InnerTableCommit {
     @Override
     public TableCommitImpl withOverwrite(@Nullable Map<String, String> overwritePartitions) {
         this.overwritePartition = overwritePartitions;
-        return this;
-    }
-
-    @Override
-    public TableCommitImpl withLock(Lock lock) {
-        commit.withLock(lock);
-
-        if (expire != null) {
-            expire.withLock(lock);
-        }
-
-        if (partitionExpire != null) {
-            partitionExpire.withLock(lock);
-        }
-
-        this.lock = lock;
         return this;
     }
 
@@ -101,17 +107,32 @@ public class TableCommitImpl implements InnerTableCommit {
     }
 
     @Override
+    public void commit(List<CommitMessage> commitMessages) {
+        checkState(!batchCommitted, "BatchTableCommit only support one-time committing.");
+        batchCommitted = true;
+        commit(BatchWriteBuilder.COMMIT_IDENTIFIER, commitMessages);
+    }
+
+    @Override
     public void commit(long identifier, List<CommitMessage> commitMessages) {
+        commit(createManifestCommittable(identifier, commitMessages));
+    }
+
+    @Override
+    public int filterAndCommit(Map<Long, List<CommitMessage>> commitIdentifiersAndMessages) {
+        return filterAndCommitMultiple(
+                commitIdentifiersAndMessages.entrySet().stream()
+                        .map(e -> createManifestCommittable(e.getKey(), e.getValue()))
+                        .collect(Collectors.toList()));
+    }
+
+    private ManifestCommittable createManifestCommittable(
+            long identifier, List<CommitMessage> commitMessages) {
         ManifestCommittable committable = new ManifestCommittable(identifier);
         for (CommitMessage commitMessage : commitMessages) {
             committable.addFileCommittable(commitMessage);
         }
-        if (overwritePartition == null) {
-            commit.commit(committable, new HashMap<>());
-        } else {
-            commit.overwrite(overwritePartition, committable, Collections.emptyMap());
-        }
-        expire(identifier);
+        return committable;
     }
 
     public void commit(ManifestCommittable committable) {
@@ -143,6 +164,35 @@ public class TableCommitImpl implements InnerTableCommit {
             commit.overwrite(overwritePartition, committable, Collections.emptyMap());
             expire(committable.identifier());
         }
+
+        commitCallbacks.forEach(c -> c.call(committables));
+    }
+
+    public int filterAndCommitMultiple(List<ManifestCommittable> committables) {
+        Set<Long> retryIdentifiers =
+                commit.filterCommitted(
+                        committables.stream()
+                                .map(ManifestCommittable::identifier)
+                                .collect(Collectors.toSet()));
+
+        // commitCallback may fail after the snapshot file is successfully created,
+        // so we have to try all of them again
+        List<ManifestCommittable> succeededCommittables =
+                committables.stream()
+                        .filter(c -> !retryIdentifiers.contains(c.identifier()))
+                        .collect(Collectors.toList());
+        commitCallbacks.forEach(c -> c.call(succeededCommittables));
+
+        List<ManifestCommittable> retryCommittables =
+                committables.stream()
+                        .filter(c -> retryIdentifiers.contains(c.identifier()))
+                        // identifier must be in increasing order
+                        .sorted(Comparator.comparingLong(ManifestCommittable::identifier))
+                        .collect(Collectors.toList());
+        if (retryCommittables.size() > 0) {
+            commitMultiple(retryCommittables);
+        }
+        return retryCommittables.size();
     }
 
     private void expire(long partitionExpireIdentifier) {
@@ -158,20 +208,18 @@ public class TableCommitImpl implements InnerTableCommit {
         if (partitionExpire != null) {
             partitionExpire.expire(partitionExpireIdentifier);
         }
-    }
 
-    @Override
-    public void close() throws Exception {
-        if (lock != null) {
-            lock.close();
+        if (tagAutoCreation != null) {
+            tagAutoCreation.run();
         }
     }
 
     @Override
-    public void commit(List<CommitMessage> commitMessages) {
-        checkState(!batchCommitted, "BatchTableCommit only support one-time committing.");
-        batchCommitted = true;
-        commit(BatchWriteBuilder.COMMIT_IDENTIFIER, commitMessages);
+    public void close() throws Exception {
+        for (CommitCallback commitCallback : commitCallbacks) {
+            IOUtils.closeQuietly(commitCallback);
+        }
+        IOUtils.closeQuietly(lock);
     }
 
     @Override

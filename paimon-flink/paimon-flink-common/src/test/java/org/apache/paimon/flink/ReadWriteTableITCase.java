@@ -32,6 +32,7 @@ import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.utils.BlockingIterator;
 
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
+import org.apache.paimon.shade.guava30.com.google.common.collect.Lists;
 
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.Configuration;
@@ -71,7 +72,11 @@ import java.util.stream.Collectors;
 
 import static org.apache.flink.table.planner.factories.TestValuesTableFactory.changelogRow;
 import static org.apache.paimon.CoreOptions.BUCKET;
+import static org.apache.paimon.CoreOptions.CHANGELOG_PRODUCER;
+import static org.apache.paimon.CoreOptions.ChangelogProducer.LOOKUP;
 import static org.apache.paimon.CoreOptions.MERGE_ENGINE;
+import static org.apache.paimon.CoreOptions.MergeEngine.DEDUPLICATE;
+import static org.apache.paimon.CoreOptions.MergeEngine.FIRST_ROW;
 import static org.apache.paimon.CoreOptions.SOURCE_SPLIT_OPEN_FILE_COST;
 import static org.apache.paimon.CoreOptions.SOURCE_SPLIT_TARGET_SIZE;
 import static org.apache.paimon.CoreOptions.WRITE_MODE;
@@ -1474,12 +1479,15 @@ public class ReadWriteTableITCase extends AbstractTestBase {
     @EnumSource(CoreOptions.MergeEngine.class)
     public void testUpdateWithPrimaryKey(CoreOptions.MergeEngine mergeEngine) throws Exception {
         Set<CoreOptions.MergeEngine> supportUpdateEngines = new HashSet<>();
-        supportUpdateEngines.add(CoreOptions.MergeEngine.DEDUPLICATE);
+        supportUpdateEngines.add(DEDUPLICATE);
         supportUpdateEngines.add(CoreOptions.MergeEngine.PARTIAL_UPDATE);
         // Step1: define table schema
         Map<String, String> options = new HashMap<>();
         options.put(WRITE_MODE.key(), WriteMode.CHANGE_LOG.toString());
         options.put(MERGE_ENGINE.key(), mergeEngine.toString());
+        if (mergeEngine == FIRST_ROW) {
+            options.put(CHANGELOG_PRODUCER.key(), LOOKUP.toString());
+        }
         String table =
                 createTable(
                         Arrays.asList(
@@ -1531,6 +1539,77 @@ public class ReadWriteTableITCase extends AbstractTestBase {
         }
     }
 
+    @Test
+    public void testDefaultValueWithoutPrimaryKey() throws Exception {
+        Map<String, String> options = new HashMap<>();
+        options.put(WRITE_MODE.key(), WriteMode.AUTO.name());
+        options.put(
+                CoreOptions.FIELDS_PREFIX + ".rate." + CoreOptions.DEFAULT_VALUE_SUFFIX, "1000");
+
+        String table =
+                createTable(
+                        Arrays.asList(
+                                "id BIGINT NOT NULL",
+                                "currency STRING",
+                                "rate BIGINT",
+                                "dt String"),
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        options);
+        insertInto(
+                table,
+                "(1, 'US Dollar', 114, '2022-01-01')",
+                "(2, 'Yen', cast(null as int), '2022-01-01')",
+                "(3, 'Euro', cast(null as int), '2022-01-01')",
+                "(3, 'Euro', 119, '2022-01-02')");
+
+        List<Row> expectedRecords =
+                Arrays.asList(
+                        // part = 2022-01-01
+                        changelogRow("+I", 2L, "Yen", 1000L, "2022-01-01"),
+                        changelogRow("+I", 3L, "Euro", 1000L, "2022-01-01"));
+
+        String querySql = String.format("SELECT * FROM %s where rate = 1000", table);
+        testBatchRead(querySql, expectedRecords);
+    }
+
+    @ParameterizedTest
+    @EnumSource(CoreOptions.MergeEngine.class)
+    public void testDefaultValueWithPrimaryKey(CoreOptions.MergeEngine mergeEngine)
+            throws Exception {
+        Map<String, String> options = new HashMap<>();
+        options.put(WRITE_MODE.key(), WriteMode.AUTO.name());
+        options.put(
+                CoreOptions.FIELDS_PREFIX + ".rate." + CoreOptions.DEFAULT_VALUE_SUFFIX, "1000");
+        options.put(MERGE_ENGINE.key(), mergeEngine.toString());
+        if (mergeEngine == FIRST_ROW) {
+            options.put(CHANGELOG_PRODUCER.key(), LOOKUP.toString());
+        }
+        String table =
+                createTable(
+                        Arrays.asList(
+                                "id BIGINT NOT NULL",
+                                "currency STRING",
+                                "rate BIGINT",
+                                "dt String"),
+                        Lists.newArrayList("id", "dt"),
+                        Lists.newArrayList("dt"),
+                        options);
+        insertInto(
+                table,
+                "(1, 'US Dollar', 114, '2022-01-01')",
+                "(2, 'Yen', cast(null as int), '2022-01-01')",
+                "(2, 'Yen', cast(null as int), '2022-01-01')",
+                "(3, 'Euro', cast(null as int) , '2022-01-02')");
+
+        List<Row> expectedRecords =
+                Arrays.asList(changelogRow("+I", 3L, "Euro", 1000L, "2022-01-02"));
+
+        String querySql =
+                String.format("SELECT * FROM %s where rate = 1000 and currency ='Euro'", table);
+        testBatchRead(querySql, expectedRecords);
+    }
+
     @ParameterizedTest
     @EnumSource(WriteMode.class)
     public void testUpdateWithoutPrimaryKey(WriteMode writeMode) throws Exception {
@@ -1580,12 +1659,15 @@ public class ReadWriteTableITCase extends AbstractTestBase {
     @EnumSource(CoreOptions.MergeEngine.class)
     public void testDeleteWithPrimaryKey(CoreOptions.MergeEngine mergeEngine) throws Exception {
         Set<CoreOptions.MergeEngine> supportUpdateEngines = new HashSet<>();
-        supportUpdateEngines.add(CoreOptions.MergeEngine.DEDUPLICATE);
+        supportUpdateEngines.add(DEDUPLICATE);
 
         // Step1: define table schema
         Map<String, String> options = new HashMap<>();
         options.put(WRITE_MODE.key(), WriteMode.CHANGE_LOG.toString());
         options.put(MERGE_ENGINE.key(), mergeEngine.toString());
+        if (mergeEngine == FIRST_ROW) {
+            options.put(CHANGELOG_PRODUCER.key(), LOOKUP.toString());
+        }
         String table =
                 createTable(
                         Arrays.asList(
@@ -1661,6 +1743,205 @@ public class ReadWriteTableITCase extends AbstractTestBase {
             testBatchRead(querySql, expectedRecords);
         } else {
             assertThatThrownBy(() -> bEnv.executeSql(deleteStatement).await())
+                    .satisfies(AssertionUtils.anyCauseMatches(UnsupportedOperationException.class));
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(CoreOptions.MergeEngine.class)
+    public void testDeletePushDownWithPrimaryKey(CoreOptions.MergeEngine mergeEngine)
+            throws Exception {
+        Set<CoreOptions.MergeEngine> supportUpdateEngines = new HashSet<>();
+        supportUpdateEngines.add(CoreOptions.MergeEngine.DEDUPLICATE);
+
+        // Step1: define table schema
+        Map<String, String> options = new HashMap<>();
+        options.put(WRITE_MODE.key(), WriteMode.CHANGE_LOG.toString());
+        options.put(MERGE_ENGINE.key(), mergeEngine.toString());
+        if (mergeEngine == FIRST_ROW) {
+            options.put(CHANGELOG_PRODUCER.key(), LOOKUP.toString());
+        }
+        String table =
+                createTable(
+                        Arrays.asList(
+                                "id BIGINT NOT NULL",
+                                "currency STRING",
+                                "rate BIGINT",
+                                "dt String"),
+                        Arrays.asList("id", "dt"),
+                        Collections.singletonList("dt"),
+                        options);
+
+        // Step2: batch write some historical data
+        insertInto(
+                table,
+                "(1, 'US Dollar', 114, '2022-01-01')",
+                "(2, 'UNKNOWN', -1, '2022-01-01')",
+                "(3, 'Euro', 119, '2022-01-02')",
+                "(4, 'CNY', 119, '2022-01-02')",
+                "(5, 'HKD', 119, '2022-01-03')",
+                "(6, 'CAD', 119, '2022-01-03')",
+                "(7, 'INR', 119, '2022-01-03')",
+                "(8, 'MOP', 119, '2022-01-03')");
+
+        // Test1 delete statement 'where pk = x'
+        String deleteStatement =
+                String.format("DELETE FROM %s WHERE id = 2 and dt = '2022-01-01'", table);
+        List<Row> expectedRecords =
+                Arrays.asList(
+                        changelogRow("+I", 1L, "US Dollar", 114L, "2022-01-01"),
+                        changelogRow("+I", 3L, "Euro", 119L, "2022-01-02"),
+                        changelogRow("+I", 4L, "CNY", 119L, "2022-01-02"),
+                        changelogRow("+I", 5L, "HKD", 119L, "2022-01-03"),
+                        changelogRow("+I", 6L, "CAD", 119L, "2022-01-03"),
+                        changelogRow("+I", 7L, "INR", 119L, "2022-01-03"),
+                        changelogRow("+I", 8L, "MOP", 119L, "2022-01-03"));
+        if (supportUpdateEngines.contains(mergeEngine)) {
+            bEnv.executeSql(deleteStatement).await();
+            String querySql = String.format("SELECT * FROM %s", table);
+            testBatchRead(querySql, expectedRecords);
+        } else {
+            assertThatThrownBy(() -> bEnv.executeSql(deleteStatement).await())
+                    .satisfies(AssertionUtils.anyCauseMatches(UnsupportedOperationException.class));
+        }
+
+        // Test2 delete statement no where
+        String deleteStatement2 = String.format("DELETE FROM %s", table);
+        if (supportUpdateEngines.contains(mergeEngine)) {
+            bEnv.executeSql(deleteStatement2).await();
+            String querySql = String.format("SELECT * FROM %s", table);
+            testBatchRead(querySql, Collections.emptyList());
+        } else {
+            assertThatThrownBy(() -> bEnv.executeSql(deleteStatement2).await())
+                    .satisfies(AssertionUtils.anyCauseMatches(UnsupportedOperationException.class));
+        }
+
+        // Test3 delete statement where pt
+        String deleteStatement3 = String.format("DELETE FROM %s WHERE dt = '2022-01-03'", table);
+        if (supportUpdateEngines.contains(mergeEngine)) {
+            bEnv.executeSql(deleteStatement3).await();
+            String querySql = String.format("SELECT * FROM %s", table);
+            testBatchRead(querySql, Collections.emptyList());
+        } else {
+            assertThatThrownBy(() -> bEnv.executeSql(deleteStatement3).await())
+                    .satisfies(AssertionUtils.anyCauseMatches(UnsupportedOperationException.class));
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(CoreOptions.MergeEngine.class)
+    public void testDeletePushDownWithPartitionKey(CoreOptions.MergeEngine mergeEngine)
+            throws Exception {
+        Set<CoreOptions.MergeEngine> supportUpdateEngines = new HashSet<>();
+        supportUpdateEngines.add(CoreOptions.MergeEngine.DEDUPLICATE);
+
+        // Step1: define table schema
+        Map<String, String> options = new HashMap<>();
+        options.put(WRITE_MODE.key(), WriteMode.CHANGE_LOG.toString());
+        options.put(MERGE_ENGINE.key(), mergeEngine.toString());
+        if (mergeEngine == FIRST_ROW) {
+            options.put(CHANGELOG_PRODUCER.key(), LOOKUP.toString());
+        }
+        String table =
+                createTable(
+                        Arrays.asList(
+                                "id BIGINT NOT NULL",
+                                "currency STRING",
+                                "rate BIGINT",
+                                "dt String",
+                                "hh String"),
+                        Arrays.asList("id", "dt", "hh"),
+                        Arrays.asList("dt", "hh"),
+                        options);
+
+        // Step2: batch write some historical data
+        insertInto(
+                table,
+                "(1, 'US Dollar', 114, '2022-01-01', '11')",
+                "(2, 'UNKNOWN', -1, '2022-01-01', '12')",
+                "(3, 'Euro', 119, '2022-01-02', '13')",
+                "(4, 'CNY', 119, '2022-01-03', '14')",
+                "(5, 'HKD', 119, '2022-01-03', '15')",
+                "(6, 'CAD', 119, '2022-01-03', '16')",
+                "(7, 'INR', 119, '2022-01-03', '17')",
+                "(8, 'MOP', 119, '2022-01-03', '18')");
+
+        // Step3: partition key not delete push down
+        String deleteStatement =
+                String.format("DELETE FROM %s WHERE dt = '2022-01-03' AND currency = 'CNY'", table);
+
+        // Step4: execute delete statement and verify result
+        List<Row> expectedRecords =
+                Arrays.asList(
+                        changelogRow("+I", 1L, "US Dollar", 114L, "2022-01-01", "11"),
+                        changelogRow("+I", 2L, "UNKNOWN", -1L, "2022-01-01", "12"),
+                        changelogRow("+I", 3L, "Euro", 119L, "2022-01-02", "13"),
+                        changelogRow("+I", 5L, "HKD", 119L, "2022-01-03", "15"),
+                        changelogRow("+I", 6L, "CAD", 119L, "2022-01-03", "16"),
+                        changelogRow("+I", 7L, "INR", 119L, "2022-01-03", "17"),
+                        changelogRow("+I", 8L, "MOP", 119L, "2022-01-03", "18"));
+        if (supportUpdateEngines.contains(mergeEngine)) {
+            bEnv.executeSql(deleteStatement).await();
+            String querySql = String.format("SELECT * FROM %s", table);
+            testBatchRead(querySql, expectedRecords);
+        } else {
+            assertThatThrownBy(() -> bEnv.executeSql(deleteStatement).await())
+                    .satisfies(AssertionUtils.anyCauseMatches(UnsupportedOperationException.class));
+        }
+
+        // Step5: partition key not push down
+        String deleteStatement1 =
+                String.format("DELETE FROM %s WHERE dt = '2022-01-02' or hh = '15'", table);
+        List<Row> expectedRecords1 =
+                Arrays.asList(
+                        changelogRow("+I", 1L, "US Dollar", 114L, "2022-01-01", "11"),
+                        changelogRow("+I", 2L, "UNKNOWN", -1L, "2022-01-01", "12"),
+                        changelogRow("+I", 6L, "CAD", 119L, "2022-01-03", "16"),
+                        changelogRow("+I", 7L, "INR", 119L, "2022-01-03", "17"),
+                        changelogRow("+I", 8L, "MOP", 119L, "2022-01-03", "18"));
+        if (supportUpdateEngines.contains(mergeEngine)) {
+            bEnv.executeSql(deleteStatement1).await();
+            String querySql = String.format("SELECT * FROM %s", table);
+            testBatchRead(querySql, expectedRecords1);
+        } else {
+            assertThatThrownBy(() -> bEnv.executeSql(deleteStatement1).await())
+                    .satisfies(AssertionUtils.anyCauseMatches(UnsupportedOperationException.class));
+        }
+
+        // Step6: partition key delete push down
+        String deleteStatement2 =
+                String.format("DELETE FROM %s WHERE dt = '2022-01-03' and hh = '16'", table);
+
+        // Step7: execute delete statement and verify result
+        List<Row> expectedRecords2 =
+                Arrays.asList(
+                        changelogRow("+I", 1L, "US Dollar", 114L, "2022-01-01", "11"),
+                        changelogRow("+I", 2L, "UNKNOWN", -1L, "2022-01-01", "12"),
+                        changelogRow("+I", 7L, "INR", 119L, "2022-01-03", "17"),
+                        changelogRow("+I", 8L, "MOP", 119L, "2022-01-03", "18"));
+        if (supportUpdateEngines.contains(mergeEngine)) {
+            bEnv.executeSql(deleteStatement2).await();
+            String querySql = String.format("SELECT * FROM %s", table);
+            testBatchRead(querySql, expectedRecords2);
+        } else {
+            assertThatThrownBy(() -> bEnv.executeSql(deleteStatement2).await())
+                    .satisfies(AssertionUtils.anyCauseMatches(UnsupportedOperationException.class));
+        }
+
+        // Step8: partition key delete push down
+        String deleteStatement3 = String.format("DELETE FROM %s WHERE dt = '2022-01-03'", table);
+
+        // Step9: execute delete statement and verify result
+        List<Row> expectedRecords3 =
+                Arrays.asList(
+                        changelogRow("+I", 1L, "US Dollar", 114L, "2022-01-01", "11"),
+                        changelogRow("+I", 2L, "UNKNOWN", -1L, "2022-01-01", "12"));
+        if (supportUpdateEngines.contains(mergeEngine)) {
+            bEnv.executeSql(deleteStatement3).await();
+            String querySql = String.format("SELECT * FROM %s", table);
+            testBatchRead(querySql, expectedRecords3);
+        } else {
+            assertThatThrownBy(() -> bEnv.executeSql(deleteStatement3).await())
                     .satisfies(AssertionUtils.anyCauseMatches(UnsupportedOperationException.class));
         }
     }

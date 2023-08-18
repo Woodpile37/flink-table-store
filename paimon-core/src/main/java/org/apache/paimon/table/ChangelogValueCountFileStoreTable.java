@@ -31,7 +31,7 @@ import org.apache.paimon.manifest.ManifestCacheFilter;
 import org.apache.paimon.mergetree.compact.ValueCountMergeFunction;
 import org.apache.paimon.operation.FileStoreScan;
 import org.apache.paimon.operation.KeyValueFileStoreScan;
-import org.apache.paimon.operation.ReverseReader;
+import org.apache.paimon.operation.Lock;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.schema.KeyValueFieldsExtractor;
@@ -58,16 +58,24 @@ import static org.apache.paimon.schema.SystemColumns.VALUE_COUNT;
 public class ChangelogValueCountFileStoreTable extends AbstractFileStoreTable {
 
     private static final long serialVersionUID = 1L;
-
     private transient KeyValueFileStore lazyStore;
 
     ChangelogValueCountFileStoreTable(FileIO fileIO, Path path, TableSchema tableSchema) {
-        super(fileIO, path, tableSchema);
+        this(fileIO, path, tableSchema, new CatalogEnvironment(Lock.emptyFactory(), null, null));
+    }
+
+    ChangelogValueCountFileStoreTable(
+            FileIO fileIO,
+            Path path,
+            TableSchema tableSchema,
+            CatalogEnvironment catalogEnvironment) {
+        super(fileIO, path, tableSchema, catalogEnvironment);
     }
 
     @Override
     protected FileStoreTable copy(TableSchema newTableSchema) {
-        return new ChangelogValueCountFileStoreTable(fileIO, path, newTableSchema);
+        return new ChangelogValueCountFileStoreTable(
+                fileIO, path, newTableSchema, catalogEnvironment);
     }
 
     @Override
@@ -80,6 +88,7 @@ public class ChangelogValueCountFileStoreTable extends AbstractFileStoreTable {
                             fileIO,
                             schemaManager(),
                             tableSchema.id(),
+                            false,
                             new CoreOptions(tableSchema.options()),
                             tableSchema.logicalPartitionType(),
                             tableSchema.logicalBucketKeyType(),
@@ -102,8 +111,6 @@ public class ChangelogValueCountFileStoreTable extends AbstractFileStoreTable {
     /**
      * Currently, the streaming read of overwrite is implemented by reversing the {@link RowKind} of
      * overwrote records to {@link RowKind#DELETE}, so only tables that have primary key support it.
-     *
-     * @see ReverseReader
      */
     @Override
     public boolean supportStreamingReadOverwrite() {
@@ -116,7 +123,7 @@ public class ChangelogValueCountFileStoreTable extends AbstractFileStoreTable {
     }
 
     @Override
-    public InnerTableRead newRead() {
+    public InnerTableRead innerRead() {
         return new KeyValueTableRead(store().newRead()) {
 
             @Override
@@ -135,6 +142,12 @@ public class ChangelogValueCountFileStoreTable extends AbstractFileStoreTable {
             protected RecordReader.RecordIterator<InternalRow> rowDataRecordIteratorFromKv(
                     RecordReader.RecordIterator<KeyValue> kvRecordIterator) {
                 return new ValueCountRowDataRecordIterator(kvRecordIterator);
+            }
+
+            @Override
+            public InnerTableRead forceKeepDelete() {
+                read.forceKeepDelete();
+                return this;
             }
         };
     }

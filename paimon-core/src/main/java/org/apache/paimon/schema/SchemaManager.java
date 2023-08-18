@@ -137,7 +137,7 @@ public class SchemaManager implements Serializable {
                 }
                 String pk = options.get(CoreOptions.PRIMARY_KEY.key());
                 primaryKeys = Arrays.asList(pk.split(","));
-                boolean exists = primaryKeys.stream().allMatch(columnNames::contains);
+                boolean exists = columnNames.containsAll(primaryKeys);
                 if (!exists) {
                     throw new RuntimeException(
                             String.format(
@@ -154,7 +154,7 @@ public class SchemaManager implements Serializable {
                 }
                 String partitions = options.get(CoreOptions.PARTITION.key());
                 partitionKeys = Arrays.asList(partitions.split(","));
-                boolean exists = partitionKeys.stream().allMatch(columnNames::contains);
+                boolean exists = columnNames.containsAll(partitionKeys);
                 if (!exists) {
                     throw new RuntimeException(
                             String.format(
@@ -187,7 +187,9 @@ public class SchemaManager implements Serializable {
     }
 
     /** Update {@link SchemaChange}s. */
-    public TableSchema commitChanges(List<SchemaChange> changes) throws Exception {
+    public TableSchema commitChanges(List<SchemaChange> changes)
+            throws Catalog.TableNotExistException, Catalog.ColumnAlreadyExistException,
+                    Catalog.ColumnNotExistException {
         while (true) {
             TableSchema schema =
                     latest().orElseThrow(
@@ -299,7 +301,10 @@ public class SchemaManager implements Serializable {
                                                     update.newDataType()));
                                 }
                                 return new DataField(
-                                        field.id(), field.name(), update.newDataType());
+                                        field.id(),
+                                        field.name(),
+                                        update.newDataType(),
+                                        field.description());
                             });
                 } else if (change instanceof UpdateColumnNullability) {
                     UpdateColumnNullability update = (UpdateColumnNullability) change;
@@ -372,9 +377,31 @@ public class SchemaManager implements Serializable {
                             newOptions,
                             schema.comment());
 
-            boolean success = commit(newSchema);
-            if (success) {
-                return newSchema;
+            try {
+                boolean success = commit(newSchema);
+                if (success) {
+                    return newSchema;
+                }
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
+    public boolean mergeSchema(RowType rowType, boolean allowExplicitCast) {
+        TableSchema current =
+                latest().orElseThrow(
+                                () ->
+                                        new RuntimeException(
+                                                "It requires that the current schema to exist when calling 'mergeSchema'"));
+        TableSchema update = SchemaMergingUtils.mergeSchemas(current, rowType, allowExplicitCast);
+        if (current.equals(update)) {
+            return false;
+        } else {
+            try {
+                return commit(update);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to commit the schema.", e);
             }
         }
     }

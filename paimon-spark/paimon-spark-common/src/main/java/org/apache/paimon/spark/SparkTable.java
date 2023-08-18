@@ -18,9 +18,11 @@
 
 package org.apache.paimon.spark;
 
-import org.apache.paimon.operation.Lock;
+import org.apache.paimon.CoreOptions;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.table.DataTable;
+import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.TableUtils;
 
@@ -40,6 +42,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -53,17 +56,19 @@ public class SparkTable
                 SupportsDelete {
 
     private final Table table;
-    private final Lock.Factory lockFactory;
 
-    public SparkTable(Table table, Lock.Factory lockFactory) {
+    public SparkTable(Table table) {
         this.table = table;
-        this.lockFactory = lockFactory;
+    }
+
+    public Table getTable() {
+        return table;
     }
 
     @Override
     public ScanBuilder newScanBuilder(CaseInsensitiveStringMap options) {
-        // options is already merged into table
-        return new SparkScanBuilder(table);
+        Table newTable = table.copy(options.asCaseSensitiveMap());
+        return new SparkScanBuilder(newTable);
     }
 
     @Override
@@ -81,6 +86,8 @@ public class SparkTable
         Set<TableCapability> capabilities = new HashSet<>();
         capabilities.add(TableCapability.BATCH_READ);
         capabilities.add(TableCapability.V1_BATCH_WRITE);
+        capabilities.add(TableCapability.OVERWRITE_BY_FILTER);
+        capabilities.add(TableCapability.OVERWRITE_DYNAMIC);
         return capabilities;
     }
 
@@ -94,7 +101,11 @@ public class SparkTable
 
     @Override
     public WriteBuilder newWriteBuilder(LogicalWriteInfo info) {
-        return new SparkWriteBuilder(table, lockFactory);
+        try {
+            return new SparkWriteBuilder((FileStoreTable) table, Options.fromMap(info.options()));
+        } catch (Exception e) {
+            throw new RuntimeException("Only FileStoreTable can be written.");
+        }
     }
 
     @Override
@@ -109,13 +120,19 @@ public class SparkTable
             predicates.add(converter.convert(filter));
         }
 
-        TableUtils.deleteWhere(table, predicates, lockFactory);
+        TableUtils.deleteWhere(table, predicates);
     }
 
     @Override
     public Map<String, String> properties() {
         if (table instanceof DataTable) {
-            return ((DataTable) table).coreOptions().toMap();
+            Map<String, String> properties =
+                    new HashMap<>(((DataTable) table).coreOptions().toMap());
+            if (table.primaryKeys().size() > 0) {
+                properties.put(
+                        CoreOptions.PRIMARY_KEY.key(), String.join(",", table.primaryKeys()));
+            }
+            return properties;
         } else {
             return Collections.emptyMap();
         }

@@ -19,8 +19,10 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.annotation.Experimental;
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.flink.sink.index.GlobalDynamicCdcBucketSink;
 import org.apache.paimon.flink.utils.SingleOutputStreamOperatorUtils;
-import org.apache.paimon.operation.Lock;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
@@ -46,7 +48,8 @@ public class CdcSinkBuilder<T> {
     private DataStream<T> input = null;
     private EventParser.Factory<T> parserFactory = null;
     private Table table = null;
-    private Lock.Factory lockFactory = Lock.emptyFactory();
+    private Identifier identifier = null;
+    private Catalog.Loader catalogLoader = null;
 
     @Nullable private Integer parallelism;
 
@@ -65,13 +68,18 @@ public class CdcSinkBuilder<T> {
         return this;
     }
 
-    public CdcSinkBuilder<T> withLockFactory(Lock.Factory lockFactory) {
-        this.lockFactory = lockFactory;
+    public CdcSinkBuilder<T> withParallelism(@Nullable Integer parallelism) {
+        this.parallelism = parallelism;
         return this;
     }
 
-    public CdcSinkBuilder<T> withParallelism(@Nullable Integer parallelism) {
-        this.parallelism = parallelism;
+    public CdcSinkBuilder<T> withIdentifier(Identifier identifier) {
+        this.identifier = identifier;
+        return this;
+    }
+
+    public CdcSinkBuilder<T> withCatalogLoader(Catalog.Loader catalogLoader) {
+        this.catalogLoader = catalogLoader;
         return this;
     }
 
@@ -79,6 +87,8 @@ public class CdcSinkBuilder<T> {
         Preconditions.checkNotNull(input, "Input DataStream can not be null.");
         Preconditions.checkNotNull(parserFactory, "Event ParserFactory can not be null.");
         Preconditions.checkNotNull(table, "Paimon Table can not be null.");
+        Preconditions.checkNotNull(identifier, "Paimon Table Identifier can not be null.");
+        Preconditions.checkNotNull(catalogLoader, "Paimon Catalog Loader can not be null.");
 
         if (!(table instanceof FileStoreTable)) {
             throw new IllegalArgumentException(
@@ -97,8 +107,9 @@ public class CdcSinkBuilder<T> {
                                 parsed, CdcParsingProcessFunction.NEW_DATA_FIELD_LIST_OUTPUT_TAG)
                         .process(
                                 new UpdatedDataFieldsProcessFunction(
-                                        new SchemaManager(
-                                                dataTable.fileIO(), dataTable.location())));
+                                        new SchemaManager(dataTable.fileIO(), dataTable.location()),
+                                        identifier,
+                                        catalogLoader));
         schemaChangeProcessFunction.getTransformation().setParallelism(1);
         schemaChangeProcessFunction.getTransformation().setMaxParallelism(1);
 
@@ -107,22 +118,20 @@ public class CdcSinkBuilder<T> {
             case FIXED:
                 return buildForFixedBucket(parsed);
             case DYNAMIC:
-                return buildForDynamicBucket(parsed);
+                return new CdcDynamicBucketSink((FileStoreTable) table).build(parsed, parallelism);
+            case GLOBAL_DYNAMIC:
+                return new GlobalDynamicCdcBucketSink((FileStoreTable) table)
+                        .build(parsed, parallelism);
             case UNAWARE:
             default:
                 throw new UnsupportedOperationException("Unsupported bucket mode: " + bucketMode);
         }
     }
 
-    private DataStreamSink<?> buildForDynamicBucket(DataStream<CdcRecord> parsed) {
-        return new CdcDynamicBucketSink((FileStoreTable) table, lockFactory)
-                .build(parsed, parallelism);
-    }
-
     private DataStreamSink<?> buildForFixedBucket(DataStream<CdcRecord> parsed) {
         FileStoreTable dataTable = (FileStoreTable) table;
         DataStream<CdcRecord> partitioned =
                 partition(parsed, new CdcRecordChannelComputer(dataTable.schema()), parallelism);
-        return new FlinkCdcSink(dataTable, lockFactory).sinkFrom(partitioned);
+        return new FlinkCdcSink(dataTable).sinkFrom(partitioned);
     }
 }

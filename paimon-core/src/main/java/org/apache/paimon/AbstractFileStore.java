@@ -30,9 +30,10 @@ import org.apache.paimon.operation.FileStoreCommitImpl;
 import org.apache.paimon.operation.FileStoreExpireImpl;
 import org.apache.paimon.operation.PartitionExpire;
 import org.apache.paimon.operation.SnapshotDeletion;
-import org.apache.paimon.operation.TagFileKeeper;
+import org.apache.paimon.operation.TagDeletion;
 import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.schema.SchemaManager;
+import org.apache.paimon.tag.TagAutoCreation;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.FileStorePathFactory;
 import org.apache.paimon.utils.SegmentsCache;
@@ -142,6 +143,11 @@ public abstract class AbstractFileStore<T> implements FileStore<T> {
     }
 
     @Override
+    public boolean mergeSchema(RowType rowType, boolean allowExplicitCast) {
+        return schemaManager.mergeSchema(rowType, allowExplicitCast);
+    }
+
+    @Override
     public FileStoreCommitImpl newCommit(String commitUser) {
         return new FileStoreCommitImpl(
                 fileIO,
@@ -169,12 +175,8 @@ public abstract class AbstractFileStore<T> implements FileStore<T> {
                 options.snapshotNumRetainMax(),
                 options.snapshotTimeRetain().toMillis(),
                 snapshotManager(),
-                newIndexFileHandler(),
                 newSnapshotDeletion(),
-                new TagFileKeeper(
-                        manifestListFactory().create(),
-                        manifestFileFactory().create(),
-                        new TagManager(fileIO, options.path())));
+                newTagManager());
     }
 
     @Override
@@ -187,9 +189,25 @@ public abstract class AbstractFileStore<T> implements FileStore<T> {
                 newIndexFileHandler());
     }
 
+    @Override
+    public TagManager newTagManager() {
+        return new TagManager(fileIO, options.path());
+    }
+
+    @Override
+    public TagDeletion newTagDeletion() {
+        return new TagDeletion(
+                fileIO,
+                pathFactory(),
+                manifestFileFactory().create(),
+                manifestListFactory().create(),
+                newIndexFileHandler());
+    }
+
     public abstract Comparator<InternalRow> newKeyComparator();
 
     @Override
+    @Nullable
     public PartitionExpire newPartitionExpire(String commitUser) {
         Duration partitionExpireTime = options.partitionExpireTime();
         if (partitionExpireTime == null || partitionType().getFieldCount() == 0) {
@@ -204,5 +222,12 @@ public abstract class AbstractFileStore<T> implements FileStore<T> {
                 options.partitionTimestampFormatter(),
                 newScan(),
                 newCommit(commitUser));
+    }
+
+    @Override
+    @Nullable
+    public TagAutoCreation newTagCreationManager() {
+        return TagAutoCreation.create(
+                options, snapshotManager(), newTagManager(), newTagDeletion());
     }
 }

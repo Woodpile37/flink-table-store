@@ -18,8 +18,14 @@
 
 package org.apache.paimon.flink.source;
 
+import org.apache.paimon.annotation.VisibleForTesting;
+import org.apache.paimon.flink.source.assigners.FIFOSplitAssigner;
+import org.apache.paimon.flink.source.assigners.PreAssignSplitAssigner;
+import org.apache.paimon.flink.source.assigners.SplitAssigner;
+import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.EndOfScanException;
+import org.apache.paimon.table.source.SnapshotNotExistPlan;
 import org.apache.paimon.table.source.StreamTableScan;
 import org.apache.paimon.table.source.TableScan;
 
@@ -35,10 +41,10 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -51,68 +57,61 @@ public class ContinuousFileSplitEnumerator
         implements SplitEnumerator<FileStoreSourceSplit, PendingSplitsCheckpoint> {
 
     private static final Logger LOG = LoggerFactory.getLogger(ContinuousFileSplitEnumerator.class);
+    private static final int SPLIT_MAX_NUM = 5_000;
 
-    private final SplitEnumeratorContext<FileStoreSourceSplit> context;
+    protected final SplitEnumeratorContext<FileStoreSourceSplit> context;
 
-    private final Map<Integer, LinkedList<FileStoreSourceSplit>> bucketSplits;
+    protected final long discoveryInterval;
 
-    private final long discoveryInterval;
+    protected final Set<Integer> readersAwaitingSplit;
 
-    private final Set<Integer> readersAwaitingSplit;
+    protected final FileStoreSourceSplitGenerator splitGenerator;
 
-    private final FileStoreSourceSplitGenerator splitGenerator;
+    protected final StreamTableScan scan;
 
-    private final StreamTableScan scan;
+    protected final SplitAssigner splitAssigner;
 
-    /** Default batch splits size to avoid exceed `akka.framesize`. */
-    private final int splitBatchSize;
+    @Nullable protected Long nextSnapshotId;
 
-    @Nullable private Long nextSnapshotId;
+    protected boolean finished = false;
 
-    private boolean finished = false;
+    private boolean stopTriggerScan = false;
 
     public ContinuousFileSplitEnumerator(
             SplitEnumeratorContext<FileStoreSourceSplit> context,
             Collection<FileStoreSourceSplit> remainSplits,
             @Nullable Long nextSnapshotId,
             long discoveryInterval,
-            int splitBatchSize,
-            StreamTableScan scan) {
+            StreamTableScan scan,
+            BucketMode bucketMode) {
         checkArgument(discoveryInterval > 0L);
         this.context = checkNotNull(context);
-        this.bucketSplits = new HashMap<>();
-        addSplits(remainSplits);
         this.nextSnapshotId = nextSnapshotId;
         this.discoveryInterval = discoveryInterval;
-        this.splitBatchSize = splitBatchSize;
-        this.readersAwaitingSplit = new HashSet<>();
+        this.readersAwaitingSplit = new LinkedHashSet<>();
         this.splitGenerator = new FileStoreSourceSplitGenerator();
         this.scan = scan;
+        this.splitAssigner = createSplitAssigner(bucketMode);
+        addSplits(remainSplits);
     }
 
-    private void addSplits(Collection<FileStoreSourceSplit> splits) {
+    @VisibleForTesting
+    void enableTriggerScan() {
+        this.stopTriggerScan = false;
+    }
+
+    protected void addSplits(Collection<FileStoreSourceSplit> splits) {
         splits.forEach(this::addSplit);
     }
 
     private void addSplit(FileStoreSourceSplit split) {
-        bucketSplits
-                .computeIfAbsent(((DataSplit) split.split()).bucket(), i -> new LinkedList<>())
-                .add(split);
-    }
-
-    private void addSplitsBack(Collection<FileStoreSourceSplit> splits) {
-        new LinkedList<>(splits).descendingIterator().forEachRemaining(this::addSplitToHead);
-    }
-
-    private void addSplitToHead(FileStoreSourceSplit split) {
-        bucketSplits
-                .computeIfAbsent(((DataSplit) split.split()).bucket(), i -> new LinkedList<>())
-                .addFirst(split);
+        splitAssigner.addSplit(assignSuggestedTask(split), split);
     }
 
     @Override
     public void start() {
-        context.callAsync(scan::plan, this::processDiscoveredSplits, 0, discoveryInterval);
+        context.callAsync(
+                this::scanNextSnapshot, this::processDiscoveredSplits, 0, discoveryInterval);
     }
 
     @Override
@@ -129,6 +128,14 @@ public class ContinuousFileSplitEnumerator
     public void handleSplitRequest(int subtaskId, @Nullable String requesterHostname) {
         readersAwaitingSplit.add(subtaskId);
         assignSplits();
+        // if current task assigned no split, we check conditions to scan one more time
+        if (readersAwaitingSplit.contains(subtaskId)) {
+            if (stopTriggerScan || splitAssigner.remainingSplits().size() >= SPLIT_MAX_NUM) {
+                return;
+            }
+            stopTriggerScan = true;
+            context.callAsync(this::scanNextSnapshot, this::processDiscoveredSplits);
+        }
     }
 
     @Override
@@ -139,13 +146,12 @@ public class ContinuousFileSplitEnumerator
     @Override
     public void addSplitsBack(List<FileStoreSourceSplit> splits, int subtaskId) {
         LOG.debug("File Source Enumerator adds splits back: {}", splits);
-        addSplitsBack(splits);
+        splitAssigner.addSplitsBack(subtaskId, splits);
     }
 
     @Override
-    public PendingSplitsCheckpoint snapshotState(long checkpointId) {
-        List<FileStoreSourceSplit> splits = new ArrayList<>();
-        bucketSplits.values().forEach(splits::addAll);
+    public PendingSplitsCheckpoint snapshotState(long checkpointId) throws Exception {
+        List<FileStoreSourceSplit> splits = new ArrayList<>(splitAssigner.remainingSplits());
         final PendingSplitsCheckpoint checkpoint =
                 new PendingSplitsCheckpoint(splits, nextSnapshotId);
 
@@ -155,7 +161,18 @@ public class ContinuousFileSplitEnumerator
 
     // ------------------------------------------------------------------------
 
-    private void processDiscoveredSplits(TableScan.Plan plan, Throwable error) {
+    // this need to be synchronized because scan object is not thread safe. handleSplitRequest and
+    // context.callAsync will invoke this.
+    protected synchronized PlanWithNextSnapshotId scanNextSnapshot() {
+        TableScan.Plan plan = scan.plan();
+        Long nextSnapshotId = scan.checkpoint();
+        return new PlanWithNextSnapshotId(plan, nextSnapshotId);
+    }
+
+    // this mothod could not be synchronized, because it runs in coordinatorThread, which will make
+    // it serialize.
+    protected void processDiscoveredSplits(
+            PlanWithNextSnapshotId planWithNextSnapshotId, Throwable error) {
         if (error != null) {
             if (error instanceof EndOfScanException) {
                 // finished
@@ -168,8 +185,14 @@ public class ContinuousFileSplitEnumerator
             return;
         }
 
-        nextSnapshotId = scan.checkpoint();
+        nextSnapshotId = planWithNextSnapshotId.nextSnapshotId;
+        TableScan.Plan plan = planWithNextSnapshotId.plan;
+        if (plan.equals(SnapshotNotExistPlan.INSTANCE)) {
+            stopTriggerScan = true;
+            return;
+        }
 
+        stopTriggerScan = false;
         if (plan.splits().isEmpty()) {
             return;
         }
@@ -178,9 +201,28 @@ public class ContinuousFileSplitEnumerator
         assignSplits();
     }
 
-    private void assignSplits() {
-        Map<Integer, List<FileStoreSourceSplit>> assignment = createAssignment();
-        if (finished) {
+    /**
+     * Method should be synchronized because {@link #handleSplitRequest} and {@link
+     * #processDiscoveredSplits} have thread conflicts.
+     */
+    protected synchronized void assignSplits() {
+        // create assignment
+        Map<Integer, List<FileStoreSourceSplit>> assignment = new HashMap<>();
+        Iterator<Integer> readersAwait = readersAwaitingSplit.iterator();
+        while (readersAwait.hasNext()) {
+            Integer task = readersAwait.next();
+            if (!context.registeredReaders().containsKey(task)) {
+                readersAwait.remove();
+                continue;
+            }
+            List<FileStoreSourceSplit> splits = splitAssigner.getNext(task, null);
+            if (splits.size() > 0) {
+                assignment.put(task, splits);
+            }
+        }
+
+        // remove readers who fetched splits
+        if (noMoreSplits()) {
             Iterator<Integer> iterator = readersAwaitingSplit.iterator();
             while (iterator.hasNext()) {
                 Integer reader = iterator.next();
@@ -194,30 +236,36 @@ public class ContinuousFileSplitEnumerator
         context.assignSplits(new SplitsAssignment<>(assignment));
     }
 
-    private Map<Integer, List<FileStoreSourceSplit>> createAssignment() {
-        Map<Integer, List<FileStoreSourceSplit>> assignment = new HashMap<>();
-        bucketSplits.forEach(
-                (bucket, splits) -> {
-                    if (splits.size() > 0) {
-                        // To ensure the order of consumption, the data of the same bucket is given
-                        // to a task to be consumed.
-                        int task = bucket % context.currentParallelism();
-                        if (readersAwaitingSplit.contains(task)) {
-                            // if the reader that requested another split has failed in the
-                            // meantime, remove
-                            // it from the list of waiting readers
-                            if (!context.registeredReaders().containsKey(task)) {
-                                readersAwaitingSplit.remove(task);
-                                return;
-                            }
-                            List<FileStoreSourceSplit> taskAssignment =
-                                    assignment.computeIfAbsent(task, i -> new ArrayList<>());
-                            if (taskAssignment.size() < splitBatchSize) {
-                                taskAssignment.add(splits.poll());
-                            }
-                        }
-                    }
-                });
-        return assignment;
+    protected int assignSuggestedTask(FileStoreSourceSplit split) {
+        return ((DataSplit) split.split()).bucket() % context.currentParallelism();
+    }
+
+    protected SplitAssigner createSplitAssigner(BucketMode bucketMode) {
+        return bucketMode == BucketMode.UNAWARE
+                ? new FIFOSplitAssigner(Collections.emptyList())
+                : new PreAssignSplitAssigner(1, context, Collections.emptyList());
+    }
+
+    protected boolean noMoreSplits() {
+        return finished;
+    }
+
+    /** The result of scan. */
+    protected static class PlanWithNextSnapshotId {
+        private final TableScan.Plan plan;
+        private final Long nextSnapshotId;
+
+        public PlanWithNextSnapshotId(TableScan.Plan plan, Long nextSnapshotId) {
+            this.plan = plan;
+            this.nextSnapshotId = nextSnapshotId;
+        }
+
+        public TableScan.Plan plan() {
+            return plan;
+        }
+
+        public Long nextSnapshotId() {
+            return nextSnapshotId;
+        }
     }
 }

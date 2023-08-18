@@ -1,6 +1,6 @@
 ---
 title: "Manage Snapshots"
-weight: 3
+weight: 4
 type: docs
 aliases:
 - /maintenance/manage-snapshots.html
@@ -30,7 +30,7 @@ This section will describe the management and behavior related to snapshots.
 
 ## Expire Snapshots
 
-Paimon writers generates one or two [snapshots]({{< ref "concepts/basic-concepts#snapshots" >}}) per commit. Each snapshot may add some new data files or mark some old data files as deleted. However, the marked data files are not truly deleted because Paimon also supports time traveling to an earlier snapshot. They are only deleted when the snapshot expires.
+Paimon writers generate one or two [snapshots]({{< ref "concepts/basic-concepts#snapshots" >}}) per commit. Each snapshot may add some new data files or mark some old data files as deleted. However, the marked data files are not truly deleted because Paimon also supports time traveling to an earlier snapshot. They are only deleted when the snapshot expires.
 
 Currently, expiration is automatically performed by Paimon writers when committing new changes. By expiring old snapshots, old data files and metadata files that are no longer used can be deleted to release disk space.
 
@@ -59,15 +59,141 @@ Snapshot expiration is controlled by the following table properties.
       <td>No</td>
       <td style="word-wrap: break-word;">10</td>
       <td>Integer</td>
-      <td>The minimum number of completed snapshots to retain.</td>
+      <td>The minimum number of completed snapshots to retain. Should be greater than or equal to 1.</td>
     </tr>
     <tr>
       <td><h5>snapshot.num-retained.max</h5></td>
       <td>No</td>
       <td style="word-wrap: break-word;">Integer.MAX_VALUE</td>
       <td>Integer</td>
-      <td>The maximum number of completed snapshots to retain.</td>
+      <td>The maximum number of completed snapshots to retain. Should be greater than or equal to the minimum number.</td>
     </tr>
+    </tbody>
+</table>
+
+When the number of snapshots is less than `snapshot.num-retained.min`, no snapshots will be expired(even the condition `snapshot.time-retained` meet), after which `snapshot.num-retained.max` and `snapshot.time-retained` will be used to control the snapshot expiration until the remaining snapshot meets the condition.
+
+The following example show more details(`snapshot.num-retained.min` is 2, `snapshot.time-retained` is 1h, `snapshot.num-retained.max` is 5):
+
+> snapshot item is described using tuple (snapshotId, corresponding time)
+
+<table>
+<thead>
+    <tr>
+      <th class="text-left" style="width: 30%">New Snapshots</th>
+      <th class="text-left" style="width: 40%">All snapshots after expiration check</th>
+      <th class="text-left" style="width: 30%">explanation</th>
+    </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>
+         (snapshots-1, 2023-07-06 10:00)
+        </td>
+        <td>
+         (snapshots-1, 2023-07-06 10:00)
+        </td>
+        <td>
+          No snapshot expired
+        </td>
+      </tr>
+      <tr>
+        <td>
+         (snapshots-2, 2023-07-06 10:20)
+        </td>
+        <td>
+         (snapshots-1, 2023-07-06 10:00) <br>
+         (snapshots-2, 2023-07-06 10:20)
+        </td>
+        <td>
+          No snapshot expired
+        </td>
+      </tr>
+      <tr>
+        <td>
+          (snapshots-3, 2023-07-06 10:40)
+        </td>
+        <td>
+           (snapshots-1, 2023-07-06 10:00) <br>
+           (snapshots-2, 2023-07-06 10:20) <br>
+           (snapshots-3, 2023-07-06 10:40)
+        </td>
+        <td>
+           No snapshot expired
+        </td>
+      </tr>
+      <tr>
+        <td>
+          (snapshots-4, 2023-07-06 11:00)
+        </td>
+        <td>
+          (snapshots-1, 2023-07-06 10:00) <br>
+          (snapshots-2, 2023-07-06 10:20) <br>
+          (snapshots-3, 2023-07-06 10:40) <br>
+          (snapshots-4, 2023-07-06 11:00) <br>
+        </td>
+        <td>
+           No snapshot expired
+        </td>
+      </tr>
+      <tr>
+        <td>
+          (snapshots-5, 2023-07-06 11:20)
+        </td>
+        <td>
+          (snapshots-2, 2023-07-06 10:20) <br>
+          (snapshots-3, 2023-07-06 10:40) <br>
+          (snapshots-4, 2023-07-06 11:00) <br>
+          (snapshots-5, 2023-07-06 11:20)
+        </td>
+        <td>
+           snapshot-1 was expired because the condition `snapshot.time-retained` is not met
+        </td>
+      </tr>
+      <tr>
+        <td>
+          (snapshots-6, 2023-07-06 11:30)
+        </td>
+        <td>
+        (snapshots-3, 2023-07-06 10:40) <br>
+        (snapshots-4, 2023-07-06 11:00) <br>
+        (snapshots-5, 2023-07-06 11:20) <br>
+        (snapshots-6, 2023-07-06 11:30)
+        </td>
+        <td>
+        snapshot-2 was expired because the condition `snapshot.time-retained` is not met
+        </td>
+      </tr>
+      <tr>
+        <td>
+          (snapshots-7, 2023-07-06 11:35)
+        </td>
+        <td>
+        (snapshots-3, 2023-07-06 10:40) <br>
+        (snapshots-4, 2023-07-06 11:00) <br>
+        (snapshots-5, 2023-07-06 11:20) <br>
+        (snapshots-6, 2023-07-06 11:30) <br>
+        (snapshots-7, 2023-07-06 11:35)
+        </td>
+        <td>
+        No snapshot expired
+        </td>
+      </tr>
+      <tr>
+        <td>
+          (snapshots-8, 2023-07-06 11:36)
+        </td>
+        <td>
+        (snapshots-4, 2023-07-06 11:00) <br>
+        (snapshots-5, 2023-07-06 11:20) <br>
+        (snapshots-6, 2023-07-06 11:30) <br>
+        (snapshots-7, 2023-07-06 11:35) <br>
+        (snapshots-8, 2023-07-06 11:36)
+        </td>
+        <td>
+         snapshot-3 was expired because the condition `snapshot.num-retained.max` is not met
+        </td>
+      </tr>
     </tbody>
 </table>
 

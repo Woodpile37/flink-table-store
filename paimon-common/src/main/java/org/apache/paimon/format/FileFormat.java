@@ -18,10 +18,12 @@
 
 package org.apache.paimon.format;
 
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.format.FileFormatFactory.FormatContext;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.Predicate;
+import org.apache.paimon.statistics.FieldStatsCollector;
 import org.apache.paimon.types.RowType;
 
 import javax.annotation.Nullable;
@@ -75,7 +77,8 @@ public abstract class FileFormat {
         return createReaderFactory(rowType, projection, new ArrayList<>());
     }
 
-    public Optional<FileStatsExtractor> createStatsExtractor(RowType type) {
+    public Optional<TableStatsExtractor> createStatsExtractor(
+            RowType type, FieldStatsCollector.Factory[] statsCollectors) {
         return Optional.empty();
     }
 
@@ -87,7 +90,7 @@ public abstract class FileFormat {
     /** Create a {@link FileFormat} from format identifier and format options. */
     public static FileFormat fromIdentifier(String identifier, FormatContext context) {
         Optional<FileFormat> format =
-                fromIdentifier(identifier, context, Thread.currentThread().getContextClassLoader());
+                fromIdentifier(identifier, context, FileFormat.class.getClassLoader());
         return format.orElseGet(
                 () ->
                         fromIdentifier(identifier, context, FileFormat.class.getClassLoader())
@@ -111,5 +114,12 @@ public abstract class FileFormat {
         }
 
         return Optional.empty();
+    }
+
+    public static FileFormat getFileFormat(Options options, String formatIdentifier) {
+        int readBatchSize = options.get(CoreOptions.READ_BATCH_SIZE);
+        return FileFormat.fromIdentifier(
+                formatIdentifier,
+                new FormatContext(options.removePrefix(formatIdentifier + "."), readBatchSize));
     }
 }

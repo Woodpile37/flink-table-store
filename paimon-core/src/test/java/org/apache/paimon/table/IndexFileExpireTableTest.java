@@ -113,7 +113,36 @@ public class IndexFileExpireTableTest extends PrimaryKeyTableTestBase {
     }
 
     @Test
-    public void testIndexFileRollback() throws Exception {
+    public void testIndexFileExpirationWhenDeletingTag() throws Exception {
+        prepareExpireTable();
+        FileStoreExpireImpl expire = (FileStoreExpireImpl) table.store().newExpire();
+
+        table.createTag("tag3", 3);
+        table.createTag("tag5", 5);
+
+        long indexFileSize = indexFileSize();
+        long indexManifestSize = indexManifestSize();
+
+        // if snapshot 3 is not expired, deleting tag won't delete index files
+        table.deleteTag("tag3");
+        checkIndexFiles(3);
+        assertThat(indexFileSize()).isEqualTo(indexFileSize);
+        assertThat(indexManifestSize()).isEqualTo(indexManifestSize);
+
+        // test delete tag after expiring snapshots
+        table.createTag("tag3", 3);
+        expire.expireUntil(1, 7);
+        table.deleteTag("tag3");
+
+        TagManager tagManager = new TagManager(LocalFileIO.create(), table.path);
+        checkIndexFiles(7);
+        checkIndexFiles(tagManager.taggedSnapshot("tag5"));
+        assertThat(indexFileSize()).isEqualTo(4);
+        assertThat(indexManifestSize()).isEqualTo(2);
+    }
+
+    @Test
+    public void testIndexFileRollbackSnapshot() throws Exception {
         prepareExpireTable();
 
         long indexFileSize = indexFileSize();
@@ -135,6 +164,28 @@ public class IndexFileExpireTableTest extends PrimaryKeyTableTestBase {
         assertThat(indexManifestSize()).isEqualTo(indexManifestSize - 3);
 
         table.rollbackTo(1);
+        checkIndexFiles(1);
+        assertThat(indexFileSize()).isEqualTo(3);
+        assertThat(indexManifestSize()).isEqualTo(1);
+    }
+
+    @Test
+    public void testIndexFileRollbackTag() throws Exception {
+        prepareExpireTable();
+
+        long indexFileSize = indexFileSize();
+        long indexManifestSize = indexManifestSize();
+
+        table.createTag("tag1", 1);
+        table.createTag("tag5", 5);
+        table.createTag("tag7", 7);
+
+        table.rollbackTo(5);
+        checkIndexFiles(5);
+        assertThat(indexFileSize()).isEqualTo(indexFileSize - 2);
+        assertThat(indexManifestSize()).isEqualTo(indexManifestSize - 2);
+
+        table.rollbackTo("tag1");
         checkIndexFiles(1);
         assertThat(indexFileSize()).isEqualTo(3);
         assertThat(indexManifestSize()).isEqualTo(1);

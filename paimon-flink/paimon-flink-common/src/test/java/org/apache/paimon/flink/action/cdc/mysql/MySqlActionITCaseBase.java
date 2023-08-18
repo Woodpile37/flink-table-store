@@ -18,6 +18,8 @@
 
 package org.apache.paimon.flink.action.cdc.mysql;
 
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.action.ActionITCaseBase;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.source.ReadBuilder;
@@ -28,14 +30,18 @@ import org.apache.paimon.types.RowType;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.core.execution.JobClient;
 import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.lifecycle.Startables;
 
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -46,6 +52,7 @@ import java.util.stream.Stream;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Base test class for {@link org.apache.paimon.flink.action.Action}s related to MySQL. */
+@SuppressWarnings("BusyWait")
 public class MySqlActionITCaseBase extends ActionITCaseBase {
 
     private static final Logger LOG = LoggerFactory.getLogger(MySqlActionITCaseBase.class);
@@ -53,13 +60,6 @@ public class MySqlActionITCaseBase extends ActionITCaseBase {
     protected static final MySqlContainer MYSQL_CONTAINER = createMySqlContainer(MySqlVersion.V5_7);
     private static final String USER = "paimonuser";
     private static final String PASSWORD = "paimonpw";
-
-    @BeforeAll
-    public static void startContainers() {
-        LOG.info("Starting containers...");
-        Startables.deepStart(Stream.of(MYSQL_CONTAINER)).join();
-        LOG.info("Containers are started.");
-    }
 
     @AfterAll
     public static void stopContainers() {
@@ -72,11 +72,25 @@ public class MySqlActionITCaseBase extends ActionITCaseBase {
         return (MySqlContainer)
                 new MySqlContainer(version)
                         .withConfigurationOverride("mysql/my.cnf")
-                        .withSetupSQL("mysql/setup.sql")
                         .withUsername(USER)
                         .withPassword(PASSWORD)
                         .withEnv("TZ", "America/Los_Angeles")
                         .withLogConsumer(new Slf4jLogConsumer(LOG));
+    }
+
+    protected static void start() {
+        LOG.info("Starting containers...");
+        Startables.deepStart(Stream.of(MYSQL_CONTAINER)).join();
+        LOG.info("Containers are started.");
+    }
+
+    protected Statement getStatement() throws SQLException {
+        Connection conn =
+                DriverManager.getConnection(
+                        MYSQL_CONTAINER.getJdbcUrl(),
+                        MYSQL_CONTAINER.getUsername(),
+                        MYSQL_CONTAINER.getPassword());
+        return conn.createStatement();
     }
 
     protected void waitForResult(
@@ -150,6 +164,30 @@ public class MySqlActionITCaseBase extends ActionITCaseBase {
                 break;
             }
             Thread.sleep(1000);
+        }
+    }
+
+    protected FileStoreTable getFileStoreTable(String tableName) throws Exception {
+        Identifier identifier = Identifier.create(database, tableName);
+        try (Catalog catalog = catalog()) {
+            return (FileStoreTable) catalog.getTable(identifier);
+        }
+    }
+
+    protected void waitingTables(String... tables) throws Exception {
+        waitingTables(Arrays.asList(tables));
+    }
+
+    protected void waitingTables(List<String> tables) throws Exception {
+        LOG.info("Waiting for tables '{}'", tables);
+        try (Catalog catalog = catalog()) {
+            while (true) {
+                List<String> actualTables = catalog.listTables(database);
+                if (actualTables.containsAll(tables)) {
+                    break;
+                }
+                Thread.sleep(100);
+            }
         }
     }
 }

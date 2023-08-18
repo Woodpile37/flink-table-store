@@ -43,7 +43,8 @@ Download [paimon-oss-{{< version >}}.jar](https://repository.apache.org/snapshot
 {{< tab "Flink" >}}
 
 {{< hint info >}}
-If you have already configured oss access through Flink (Via Flink FileSystem), here you can skip the following configuration.
+If you have already configured [oss access through Flink](https://nightlies.apache.org/flink/flink-docs-release-1.17/docs/deployment/filesystems/oss/) (Via Flink FileSystem),
+here you can skip the following configuration.
 {{< /hint >}}
 
 Put `paimon-oss-{{< version >}}.jar` into `lib` directory of your Flink home, and create catalog:
@@ -51,7 +52,7 @@ Put `paimon-oss-{{< version >}}.jar` into `lib` directory of your Flink home, an
 ```sql
 CREATE CATALOG my_catalog WITH (
     'type' = 'paimon',
-    'warehouse' = 'oss://path/to/warehouse',
+    'warehouse' = 'oss://<bucket>/<path>',
     'fs.oss.endpoint' = 'oss-cn-hangzhou.aliyuncs.com',
     'fs.oss.accessKeyId' = 'xxx',
     'fs.oss.accessKeySecret' = 'yyy'
@@ -71,7 +72,7 @@ Place `paimon-oss-{{< version >}}.jar` together with `paimon-spark-{{< version >
 ```shell
 spark-sql \ 
   --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
-  --conf spark.sql.catalog.paimon.warehouse=oss://<bucket-name>/ \
+  --conf spark.sql.catalog.paimon.warehouse=oss://<bucket>/<path> \
   --conf spark.sql.catalog.paimon.fs.oss.endpoint=oss-cn-hangzhou.aliyuncs.com \
   --conf spark.sql.catalog.paimon.fs.oss.accessKeyId=xxx \
   --conf spark.sql.catalog.paimon.fs.oss.accessKeySecret=yyy

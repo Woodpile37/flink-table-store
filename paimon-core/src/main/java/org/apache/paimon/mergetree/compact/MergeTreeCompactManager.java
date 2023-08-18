@@ -49,7 +49,7 @@ public class MergeTreeCompactManager extends CompactFutureManager {
     private final Levels levels;
     private final CompactStrategy strategy;
     private final Comparator<InternalRow> keyComparator;
-    private final long minFileSize;
+    private final long compactionFileSize;
     private final int numSortedRunStopTrigger;
     private final CompactRewriter rewriter;
 
@@ -58,21 +58,27 @@ public class MergeTreeCompactManager extends CompactFutureManager {
             Levels levels,
             CompactStrategy strategy,
             Comparator<InternalRow> keyComparator,
-            long minFileSize,
+            long compactionFileSize,
             int numSortedRunStopTrigger,
             CompactRewriter rewriter) {
         this.executor = executor;
         this.levels = levels;
         this.strategy = strategy;
-        this.minFileSize = minFileSize;
+        this.compactionFileSize = compactionFileSize;
         this.numSortedRunStopTrigger = numSortedRunStopTrigger;
         this.keyComparator = keyComparator;
         this.rewriter = rewriter;
     }
 
     @Override
-    public boolean shouldWaitCompaction() {
+    public boolean shouldWaitForLatestCompaction() {
         return levels.numberOfSortedRuns() > numSortedRunStopTrigger;
+    }
+
+    @Override
+    public boolean shouldWaitForPreparingCheckpoint() {
+        // cast to long to avoid Numeric overflow
+        return levels.numberOfSortedRuns() > (long) numSortedRunStopTrigger + 1;
     }
 
     @Override
@@ -155,7 +161,8 @@ public class MergeTreeCompactManager extends CompactFutureManager {
 
     private void submitCompaction(CompactUnit unit, boolean dropDelete) {
         MergeTreeCompactTask task =
-                new MergeTreeCompactTask(keyComparator, minFileSize, rewriter, unit, dropDelete);
+                new MergeTreeCompactTask(
+                        keyComparator, compactionFileSize, rewriter, unit, dropDelete);
         if (LOG.isDebugEnabled()) {
             LOG.debug(
                     "Pick these files (name, level, size) for compaction: {}",

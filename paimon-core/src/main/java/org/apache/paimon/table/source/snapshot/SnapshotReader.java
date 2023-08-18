@@ -25,8 +25,10 @@ import org.apache.paimon.operation.ScanKind;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.Split;
+import org.apache.paimon.table.source.SplitGenerator;
 import org.apache.paimon.table.source.TableScan;
 import org.apache.paimon.utils.Filter;
+import org.apache.paimon.utils.SnapshotManager;
 
 import javax.annotation.Nullable;
 
@@ -35,9 +37,15 @@ import java.util.List;
 /** Read splits from specified {@link Snapshot} with given configuration. */
 public interface SnapshotReader {
 
+    SnapshotManager snapshotManager();
+
     ConsumerManager consumerManager();
 
+    SplitGenerator splitGenerator();
+
     SnapshotReader withSnapshot(long snapshotId);
+
+    SnapshotReader withSnapshot(Snapshot snapshot);
 
     SnapshotReader withFilter(Predicate predicate);
 
@@ -47,11 +55,15 @@ public interface SnapshotReader {
 
     SnapshotReader withBucket(int bucket);
 
+    SnapshotReader withBucketFilter(Filter<Integer> bucketFilter);
+
     /** Get splits plan from snapshot. */
     Plan read();
 
     /** Get splits plan from an overwritten snapshot. */
     Plan readOverwrittenChanges();
+
+    Plan readIncrementalDiff(Snapshot before);
 
     /** Get partitions from a snapshot. */
     List<BinaryRow> partitions();

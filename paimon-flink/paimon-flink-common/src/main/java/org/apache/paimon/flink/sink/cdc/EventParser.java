@@ -19,10 +19,12 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.annotation.Experimental;
+import org.apache.paimon.schema.Schema;
 import org.apache.paimon.types.DataField;
 
 import java.io.Serializable;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Parse a CDC change event to a list of {@link DataField}s or {@link CdcRecord}.
@@ -53,6 +55,15 @@ public interface EventParser<T> {
      * @return empty if there is no records
      */
     List<CdcRecord> parseRecords();
+
+    /**
+     * Parse newly added table schema from event.
+     *
+     * @return empty if there is no newly added table
+     */
+    default Optional<Schema> parseNewTable() {
+        return Optional.empty();
+    }
 
     /** Factory to create an {@link EventParser}. */
     interface Factory<T> extends Serializable {

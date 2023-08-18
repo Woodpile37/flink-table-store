@@ -184,7 +184,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
     private void flushWriteBuffer(boolean waitForLatestCompaction, boolean forcedFullCompaction)
             throws Exception {
         if (writeBuffer.size() > 0) {
-            if (compactManager.shouldWaitCompaction()) {
+            if (compactManager.shouldWaitForLatestCompaction()) {
                 waitForLatestCompaction = true;
             }
 
@@ -227,7 +227,10 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
     @Override
     public CommitIncrement prepareCommit(boolean waitCompaction) throws Exception {
         flushWriteBuffer(waitCompaction, false);
-        trySyncLatestCompaction(waitCompaction || commitForceCompact);
+        trySyncLatestCompaction(
+                waitCompaction
+                        || commitForceCompact
+                        || compactManager.shouldWaitForPreparingCheckpoint());
         return drainIncrement();
     }
 
@@ -267,7 +270,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
                 // 2. This file is not the input of upgraded.
                 if (!compactBefore.containsKey(file.fileName())
                         && !afterFiles.contains(file.fileName())) {
-                    writerFactory.deleteFile(file.fileName());
+                    writerFactory.deleteFile(file.fileName(), file.level());
                 }
             } else {
                 compactBefore.put(file.fileName(), file);
@@ -294,7 +297,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
         newFiles.clear();
 
         for (DataFileMeta file : newFilesChangelog) {
-            writerFactory.deleteFile(file.fileName());
+            writerFactory.deleteFile(file.fileName(), file.level());
         }
         newFilesChangelog.clear();
 
@@ -309,12 +312,12 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
         compactAfter.clear();
 
         for (DataFileMeta file : compactChangelog) {
-            writerFactory.deleteFile(file.fileName());
+            writerFactory.deleteFile(file.fileName(), file.level());
         }
         compactChangelog.clear();
 
         for (DataFileMeta file : delete) {
-            writerFactory.deleteFile(file.fileName());
+            writerFactory.deleteFile(file.fileName(), file.level());
         }
     }
 }
