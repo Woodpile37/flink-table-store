@@ -41,7 +41,7 @@
 
     <properties>
         <fs.hadoopshaded.version>3.3.4</fs.hadoopshaded.version>
-        <fs.s3.aws.version>1.12.545</fs.s3.aws.version>
+        <fs.s3.aws.version>1.12.546</fs.s3.aws.version>
         <commons.beanutils.version>1.9.4</commons.beanutils.version>
     </properties>
 
