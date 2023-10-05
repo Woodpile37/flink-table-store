@@ -22,6 +22,7 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.flink.FlinkRowData;
+import org.apache.paimon.flink.RocksDBOptions;
 import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.Schema;
@@ -36,6 +37,7 @@ import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.TraceableFileIO;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -72,7 +74,7 @@ public class FileStoreLookupFunctionTest {
         conf.set(CoreOptions.PAGE_SIZE, new MemorySize(4096));
         conf.set(CoreOptions.SNAPSHOT_NUM_RETAINED_MAX, 3);
         conf.set(CoreOptions.SNAPSHOT_NUM_RETAINED_MIN, 2);
-        conf.set(CoreOptions.CONTINUOUS_DISCOVERY_INTERVAL, Duration.ZERO);
+        conf.set(RocksDBOptions.LOOKUP_CONTINUOUS_DISCOVERY_INTERVAL, Duration.ofSeconds(1));
 
         RowType rowType =
                 RowType.of(
@@ -94,6 +96,13 @@ public class FileStoreLookupFunctionTest {
         fileStoreLookupFunction =
                 new FileStoreLookupFunction(fileStoreTable, new int[] {0, 1}, new int[] {1}, null);
         fileStoreLookupFunction.open(tempDir.toString());
+    }
+
+    @AfterEach
+    public void close() throws Exception {
+        if (fileStoreLookupFunction != null) {
+            fileStoreLookupFunction.close();
+        }
     }
 
     @Test

@@ -20,20 +20,33 @@ package org.apache.paimon.hive;
 
 import org.apache.paimon.catalog.CatalogTestBase;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.schema.Schema;
+import org.apache.paimon.types.DataField;
+import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.utils.CommonTestUtils;
+
+import org.apache.paimon.shade.guava30.com.google.common.collect.Lists;
 
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
+import org.apache.hadoop.hive.metastore.IMetaStoreClient;
+import org.apache.hadoop.hive.metastore.api.Table;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 
+import java.lang.reflect.Field;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.apache.hadoop.hive.conf.HiveConf.ConfVars.METASTORECONNECTURLKEY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /** Tests for {@link HiveCatalog}. */
 public class HiveCatalogTest extends CatalogTestBase {
@@ -114,5 +127,80 @@ public class HiveCatalogTest extends CatalogTestBase {
     private void cleanUpHiveConfDir() {
         // reset back to default value
         HiveConf.setHiveSiteLocation(HiveConf.class.getClassLoader().getResource("hive-site.xml"));
+    }
+
+    @Test
+    public void testHadoopConfDirFromEnv() {
+        Map<String, String> newEnv = new HashMap<>(System.getenv());
+        newEnv.put("HADOOP_CONF_DIR", HADOOP_CONF_DIR);
+        // add HADOOP_CONF_DIR to system environment
+        CommonTestUtils.setEnv(newEnv, false);
+
+        HiveConf hiveConf = HiveCatalog.createHiveConf(null, null);
+        assertThat(hiveConf.get("fs.defaultFS")).isEqualTo("dummy-fs");
+    }
+
+    @Test
+    public void testHiveConfDirFromEnv() {
+        try {
+            testHiveConfDirFromEnvImpl();
+        } finally {
+            cleanUpHiveConfDir();
+        }
+    }
+
+    private void testHiveConfDirFromEnvImpl() {
+        Map<String, String> newEnv = new HashMap<>(System.getenv());
+        newEnv.put("HIVE_CONF_DIR", HIVE_CONF_DIR);
+        // add HIVE_CONF_DIR to system environment
+        CommonTestUtils.setEnv(newEnv, false);
+
+        HiveConf hiveConf = HiveCatalog.createHiveConf(null, null);
+        assertThat(hiveConf.get("hive.metastore.uris")).isEqualTo("dummy-hms");
+    }
+
+    @Test
+    public void testAddHiveTableParameters() {
+        try {
+            // Create a new database for the test
+            String databaseName = "test_db";
+            catalog.createDatabase(databaseName, false);
+
+            // Create a new table with Hive table parameters
+            String tableName = "new_table";
+            Map<String, String> options = new HashMap<>();
+            options.put("hive.table.owner", "Jon");
+            options.put("hive.storage.format", "ORC");
+            options.put("snapshot.num-retained.min", "5");
+            options.put("snapshot.time-retained", "1h");
+
+            Schema addHiveTableParametersSchema =
+                    new Schema(
+                            Lists.newArrayList(
+                                    new DataField(0, "pk", DataTypes.INT()),
+                                    new DataField(1, "col1", DataTypes.STRING()),
+                                    new DataField(2, "col2", DataTypes.STRING())),
+                            Collections.emptyList(),
+                            Collections.emptyList(),
+                            options,
+                            "");
+
+            catalog.createTable(
+                    Identifier.create(databaseName, tableName),
+                    addHiveTableParametersSchema,
+                    false);
+
+            Field clientField = HiveCatalog.class.getDeclaredField("client");
+            clientField.setAccessible(true);
+            IMetaStoreClient client = (IMetaStoreClient) clientField.get(catalog);
+            Table table = client.getTable(databaseName, tableName);
+            Map<String, String> tableProperties = table.getParameters();
+
+            // Verify the transformed parameters
+            assertThat(tableProperties).containsEntry("table.owner", "Jon");
+            assertThat(tableProperties).containsEntry("storage.format", "ORC");
+        } catch (Exception e) {
+            fail("Test failed due to exception: " + e.getMessage());
+        }
     }
 }

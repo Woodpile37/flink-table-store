@@ -23,6 +23,7 @@ import org.apache.paimon.CoreOptions.MergeEngine;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.serializer.RowCompactedSerializer;
+import org.apache.paimon.flink.RocksDBOptions;
 import org.apache.paimon.flink.lookup.RocksDBStateFactory;
 import org.apache.paimon.flink.lookup.RocksDBValueState;
 import org.apache.paimon.options.Options;
@@ -57,7 +58,8 @@ public class GlobalIndexAssigner<T> implements Serializable {
     private final AbstractFileStoreTable table;
     private final SerializableFunction<TableSchema, PartitionKeyExtractor<T>> extractorFunction;
     private final SerializableFunction<TableSchema, PartitionKeyExtractor<T>>
-            keyPartExtractorFunction;
+            bootstrapExtractorFunction;
+    private final SerializableFunction<T, Integer> bootstrapBucketFunction;
     private final SerBiFunction<T, BinaryRow, T> setPartition;
     private final SerBiFunction<T, RowKind, T> setRowKind;
 
@@ -78,12 +80,14 @@ public class GlobalIndexAssigner<T> implements Serializable {
     public GlobalIndexAssigner(
             Table table,
             SerializableFunction<TableSchema, PartitionKeyExtractor<T>> extractorFunction,
-            SerializableFunction<TableSchema, PartitionKeyExtractor<T>> keyPartExtractorFunction,
+            SerializableFunction<TableSchema, PartitionKeyExtractor<T>> bootstrapExtractorFunction,
+            SerializableFunction<T, Integer> bootstrapBucketFunction,
             SerBiFunction<T, BinaryRow, T> setPartition,
             SerBiFunction<T, RowKind, T> setRowKind) {
         this.table = (AbstractFileStoreTable) table;
         this.extractorFunction = extractorFunction;
-        this.keyPartExtractorFunction = keyPartExtractorFunction;
+        this.bootstrapExtractorFunction = bootstrapExtractorFunction;
+        this.bootstrapBucketFunction = bootstrapBucketFunction;
         this.setPartition = setPartition;
         this.setRowKind = setRowKind;
     }
@@ -97,20 +101,22 @@ public class GlobalIndexAssigner<T> implements Serializable {
         CoreOptions coreOptions = table.coreOptions();
         this.targetBucketRowNumber = (int) coreOptions.dynamicBucketTargetRowNum();
         this.extractor = extractorFunction.apply(table.schema());
-        this.keyPartExtractor = keyPartExtractorFunction.apply(table.schema());
+        this.keyPartExtractor = bootstrapExtractorFunction.apply(table.schema());
 
         // state
         Options options = coreOptions.toConfiguration();
         this.path = new File(tmpDir, "lookup-" + UUID.randomUUID());
-        this.stateFactory = new RocksDBStateFactory(path.toString(), options);
-        long cacheSize = options.get(CoreOptions.LOOKUP_CACHE_MAX_MEMORY_SIZE).getBytes();
+
+        this.stateFactory =
+                new RocksDBStateFactory(
+                        path.toString(), options, coreOptions.crossPartitionUpsertIndexTtl());
         RowType keyType = table.schema().logicalTrimmedPrimaryKeysType();
         this.keyIndex =
                 stateFactory.valueState(
                         "keyIndex",
                         new RowCompactedSerializer(keyType),
                         new PositiveIntIntSerializer(),
-                        cacheSize);
+                        options.get(RocksDBOptions.LOOKUP_CACHE_ROWS));
 
         this.partMapping = new IDMapping<>(BinaryRow::copy);
         this.bucketAssigner = new BucketAssigner();
@@ -164,9 +170,12 @@ public class GlobalIndexAssigner<T> implements Serializable {
 
     public void bootstrap(T value) throws IOException {
         BinaryRow partition = keyPartExtractor.partition(value);
-        keyIndex.put(
-                keyPartExtractor.trimmedPrimaryKey(value),
-                new PositiveIntInt(partMapping.index(partition), assignBucket(partition)));
+        BinaryRow key = keyPartExtractor.trimmedPrimaryKey(value);
+        int partId = partMapping.index(partition);
+        int bucket = bootstrapBucketFunction.apply(value);
+        bucketAssigner.bootstrapBucket(partition, bucket);
+        PositiveIntInt partAndBucket = new PositiveIntInt(partId, bucket);
+        keyIndex.put(key, partAndBucket);
     }
 
     private void processNewRecord(BinaryRow partition, int partId, BinaryRow key, T value)
@@ -206,6 +215,15 @@ public class GlobalIndexAssigner<T> implements Serializable {
     private static class BucketAssigner {
 
         private final Map<BinaryRow, TreeMap<Integer, Integer>> stats = new HashMap<>();
+
+        public void bootstrapBucket(BinaryRow part, int bucket) {
+            TreeMap<Integer, Integer> bucketMap = bucketMap(part);
+            Integer count = bucketMap.get(bucket);
+            if (count == null) {
+                count = 0;
+            }
+            bucketMap.put(bucket, count + 1);
+        }
 
         public int assignBucket(BinaryRow part, Filter<Integer> filter, int maxCount) {
             TreeMap<Integer, Integer> bucketMap = bucketMap(part);

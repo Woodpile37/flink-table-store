@@ -47,7 +47,8 @@ public class RocksDBListStateTest {
 
     @Test
     void test() throws Exception {
-        RocksDBStateFactory factory = new RocksDBStateFactory(tempDir.toString(), new Options());
+        RocksDBStateFactory factory =
+                new RocksDBStateFactory(tempDir.toString(), new Options(), null);
 
         RowType keyType = RowType.of(DataTypes.STRING());
         RowType valueType = RowType.of(DataTypes.STRING());
@@ -67,6 +68,7 @@ public class RocksDBListStateTest {
         listState.add(key, row("1"));
         assertThat(getString(listState.get(key))).containsExactlyInAnyOrder("1", "2,3", "1");
         assertThat(listState.get(row("bbb"))).isEmpty();
+        factory.close();
     }
 
     public GenericRow row(String value) {
