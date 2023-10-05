@@ -69,18 +69,20 @@ under the License.
     </modules>
 
     <properties>
-        <flink.version>1.16.1</flink.version>
-        <flink.shaded.version>15.0</flink.shaded.version>
-        <flink.shaded.jackson.version>2.12.4</flink.shaded.jackson.version>
-        <hadoop.version>2.9.1</hadoop.version>
-        <scala.version>2.13.10</scala.version>
+        <project.build.outputTimestamp>2023-05-04T05:07:22Z</project.build.outputTimestamp>
+        <paimon.shade.version>0.4.0-incubating</paimon.shade.version>
+        <paimon.shade.jackson.version>2.14.2</paimon.shade.jackson.version>
+        <paimon.shade.guava.version>30.1.1-jre</paimon.shade.guava.version>
+        <paimon.shade.caffeine.version>2.9.3</paimon.shade.caffeine.version>
+        <hadoop.version>2.10.0</hadoop.version>
+        <scala.version>2.12.15</scala.version>
         <scala.binary.version>2.12</scala.binary.version>
         <snappy.version>1.1.8.3</snappy.version>
         <lz4.version>1.8.0</lz4.version>
         <slf4j.version>2.0.6</slf4j.version>
         <log4j.version>2.17.1</log4j.version>
         <junit4.version>4.13.2</junit4.version>
-        <junit5.version>5.8.1</junit5.version>
+        <junit5.version>5.9.2</junit5.version>
         <spotless.version>2.13.0</spotless.version>
         <spotless.delimiter>package</spotless.delimiter>
         <spotless.license.header>
@@ -757,7 +759,7 @@ under the License.
                             <groupId>com.puppycrawl.tools</groupId>
                             <artifactId>checkstyle</artifactId>
                             <!-- Note: match version with docs/flinkDev/ide_setup.md -->
-                            <version>8.14</version>
+                            <version>8.29</version>
                         </dependency>
                     </dependencies>
                     <executions>
