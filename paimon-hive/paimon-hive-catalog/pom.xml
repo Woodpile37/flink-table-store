@@ -25,7 +25,7 @@ under the License.
     <parent>
         <artifactId>paimon-hive</artifactId>
         <groupId>org.apache.paimon</groupId>
-        <version>0.5-SNAPSHOT</version>
+        <version>0.6-SNAPSHOT</version>
     </parent>
 
     <artifactId>paimon-hive-catalog</artifactId>
@@ -134,6 +134,14 @@ under the License.
         <dependency>
             <groupId>org.apache.paimon</groupId>
             <artifactId>paimon-core</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+            <type>test-jar</type>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.paimon</groupId>
+            <artifactId>paimon-common</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>
             <type>test-jar</type>

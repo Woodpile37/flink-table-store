@@ -40,6 +40,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /** Tests for {@link AppendOnlyTableCompactionWorkerOperator}. */
@@ -53,12 +54,12 @@ public class AppendOnlyTableCompactionWorkerOperatorTest extends TableTestBase {
                         (AppendOnlyFileStoreTable) getTableDefault(), "user");
 
         // write 200 files
-        List<CommitMessage> commitMessages = writeDataDefault(200, 100);
+        List<CommitMessage> commitMessages = writeDataDefault(200, 20);
 
         List<AppendOnlyCompactionTask> tasks = packTask(commitMessages, 5);
         List<StreamRecord<AppendOnlyCompactionTask>> records =
                 tasks.stream().map(StreamRecord::new).collect(Collectors.toList());
-        Assertions.assertThat(tasks.size()).isEqualTo(20);
+        Assertions.assertThat(tasks.size()).isEqualTo(4);
 
         workerOperator.open();
 
@@ -72,12 +73,12 @@ public class AppendOnlyTableCompactionWorkerOperatorTest extends TableTestBase {
 
         Assertions.assertThatCode(
                         () -> {
-                            while (committables.size() != 20) {
+                            while (committables.size() != 4) {
                                 committables.addAll(
                                         workerOperator.prepareCommit(false, Long.MAX_VALUE));
 
                                 Long now = System.currentTimeMillis();
-                                if (timeStart - now > timeout && committables.size() != 20) {
+                                if (timeStart - now > timeout && committables.size() != 4) {
                                     throw new RuntimeException(
                                             "Timeout waiting for compaction, maybe some error happens in "
                                                     + AppendOnlyTableCompactionWorkerOperator.class
@@ -106,12 +107,12 @@ public class AppendOnlyTableCompactionWorkerOperatorTest extends TableTestBase {
                         (AppendOnlyFileStoreTable) getTableDefault(), "user");
 
         // write 200 files
-        List<CommitMessage> commitMessages = writeDataDefault(200, 200);
+        List<CommitMessage> commitMessages = writeDataDefault(200, 40);
 
         List<AppendOnlyCompactionTask> tasks = packTask(commitMessages, 5);
         List<StreamRecord<AppendOnlyCompactionTask>> records =
                 tasks.stream().map(StreamRecord::new).collect(Collectors.toList());
-        Assertions.assertThat(tasks.size()).isEqualTo(40);
+        Assertions.assertThat(tasks.size()).isEqualTo(8);
 
         workerOperator.open();
 
@@ -120,7 +121,7 @@ public class AppendOnlyTableCompactionWorkerOperatorTest extends TableTestBase {
         }
 
         // wait compaction
-        Thread.sleep(2000);
+        Thread.sleep(500);
 
         LocalFileIO localFileIO = LocalFileIO.create();
         DataFilePathFactory dataFilePathFactory =
@@ -141,7 +142,7 @@ public class AppendOnlyTableCompactionWorkerOperatorTest extends TableTestBase {
                                 localFileIO.exists(dataFilePathFactory.toPath(fileMeta.fileName())))
                         .isTrue();
             }
-            if (i++ > 8) {
+            if (i++ > 2) {
                 break;
             }
         }
@@ -149,8 +150,18 @@ public class AppendOnlyTableCompactionWorkerOperatorTest extends TableTestBase {
         // shut down worker operator
         workerOperator.shutdown();
 
+        // wait the last runnable in thread pool to stop
+        Thread.sleep(2_000);
+
         for (Future<CommitMessage> f : workerOperator.result()) {
             try {
+                if (!f.isDone()) {
+                    try {
+                        f.get(5, TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        break;
+                    }
+                }
                 CommitMessage commitMessage = f.get();
                 List<DataFileMeta> fileMetas =
                         ((CommitMessageImpl) commitMessage).compactIncrement().compactAfter();

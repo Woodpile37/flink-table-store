@@ -25,7 +25,7 @@ under the License.
     <parent>
         <artifactId>paimon-spark</artifactId>
         <groupId>org.apache.paimon</groupId>
-        <version>0.5-SNAPSHOT</version>
+        <version>0.6-SNAPSHOT</version>
     </parent>
 
     <packaging>jar</packaging>
@@ -34,7 +34,7 @@ under the License.
     <name>Paimon : Spark : Common</name>
 
     <properties>
-        <spark.version>3.4.0</spark.version>
+        <spark.version>3.5.0</spark.version>
     </properties>
 
     <dependencies>
@@ -168,6 +168,11 @@ under the License.
             </exclusions>
         </dependency>
         <dependency>
+            <groupId>org.antlr</groupId>
+            <artifactId>antlr4-runtime</artifactId>
+            <version>${antlr4.version}</version>
+        </dependency>
+        <dependency>
             <groupId>org.scalatest</groupId>
             <artifactId>scalatest_${scala.binary.version}</artifactId>
             <version>3.1.0</version>
@@ -190,6 +195,7 @@ under the License.
     </dependencies>
 
     <build>
+
         <pluginManagement>
             <plugins>
                 <plugin>
@@ -274,6 +280,23 @@ under the License.
                             <delimiter>${spotless.delimiter}</delimiter>
                         </licenseHeader>
                     </scala>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.antlr</groupId>
+                <artifactId>antlr4-maven-plugin</artifactId>
+                <version>${antlr4.version}</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>antlr4</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <visitor>true</visitor>
+                    <listener>true</listener>
+                    <sourceDirectory>src/main/antlr4</sourceDirectory>
                 </configuration>
             </plugin>
         </plugins>

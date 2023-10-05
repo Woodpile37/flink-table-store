@@ -69,7 +69,7 @@ It is recommended that the parallelism of sink should be less than or equal to t
 ### Asynchronous Compaction
 
 Compaction is inherently asynchronous, but if you want it to be completely asynchronous and not blocking writing,
-expect a mode to have maximum write throughput, the compaction can be done slowly and not in a hurry.
+expect a mode to have maximum writing throughput, the compaction can be done slowly and not in a hurry.
 You can use the following strategies for your table:
 
 ```shell
@@ -163,6 +163,20 @@ One can easily see that too many sorted runs will result in poor query performan
 
 Compaction will become less frequent when `num-sorted-run.compaction-trigger` becomes larger, thus improving writing performance. However, if this value becomes too large, more memory and CPU time will be needed when querying the table. This is a trade-off between writing and query performance.
 
+## Local Merging
+
+If your job suffers from primary key data skew
+(for example, you want to count the number of views for each page in a website,
+and some particular pages are very popular among the users),
+you can set `'local-merge-buffer-size'` so that input records will be buffered and merged
+before they're shuffled by bucket and written into sink.
+This is particularly useful when the same primary key is updated frequently between snapshots.
+
+The buffer will be flushed when it is full. We recommend starting with `64 mb`
+when you are faced with data skew but don't know where to start adjusting buffer size.
+
+(Currently, Local merging not works for CDC ingestion)
+
 ## File Format
 
 If you want to achieve ultimate compaction performance, you can consider using row storage file format AVRO.
@@ -212,7 +226,7 @@ In the initialization of write, the writer of the bucket needs to read all histo
 here (For example, writing a large number of partitions simultaneously), you can use `write-manifest-cache` to cache
 the read manifest data to accelerate initialization.
 
-## Memory
+## Write Memory
 
 There are three main places in Paimon writer that takes up memory:
 
@@ -220,8 +234,22 @@ There are three main places in Paimon writer that takes up memory:
 * Memory consumed when merging several sorted runs for compaction. Can be adjusted by the `num-sorted-run.compaction-trigger` option to change the number of sorted runs to be merged.
 * If the row is very large, reading too many lines of data at once will consume a lot of memory when making a compaction. Reducing the `read.batch-size` option can alleviate the impact of this case.
 * The memory consumed by writing columnar (ORC, Parquet, etc.) file. Decreasing the `orc.write.batch-size` option can reduce the consumption of memory for ORC format.
+* If files are automatically compaction in the write task, dictionaries for certain large columns can significantly consume memory during compaction.
+  * To disable dictionary encoding for all fields in Parquet format, set `'parquet.enable.dictionary'= 'false'`.
+  * To disable dictionary encoding for all fields in ORC format, set `orc.dictionary.key.threshold='0'`. Additionally,set `orc.column.encoding.direct='field1,field2'` to disable dictionary encoding for specific columns.
 
 If your Flink job does not rely on state, please avoid using managed memory, which you can control with the following Flink parameter:
 ```shell
 taskmanager.memory.managed.size=1m
 ```
+
+## Commit Memory
+
+Committer node may use a large memory if the amount of data written to the table is particularly large, OOM may occur
+if the memory is too small. In this case, you need to increase the Committer heap memory, but you may not want to
+increase the memory of Flink's TaskManager uniformly, which may lead to a waste of memory.
+
+You can use fine-grained-resource-management of Flink to increase committer heap memory only:
+1. Configure Flink Configuration `cluster.fine-grained-resource-management.enabled: true`. (This is default after Flink 1.18)
+2. Configure Paimon Table Options: `sink.committer-memory`, for example 300 MB, depends on your `TaskManager`.
+   (`sink.committer-cpu` is also supported)

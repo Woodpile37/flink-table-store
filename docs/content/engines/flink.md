@@ -70,8 +70,6 @@ You can find the bundled jar in `./paimon-flink/paimon-flink-<flink-version>/tar
 
 ## Quick Start
 
-### Using bundled Jar
-
 **Step 1: Download Flink**
 
 If you haven't downloaded Flink, you can [download Flink](https://flink.apache.org/downloads.html), then extract the archive with the following command.
@@ -125,6 +123,10 @@ You can now start Flink SQL client to execute SQL scripts.
 
 **Step 5: Create a Catalog and a Table**
 
+{{< tabs "Create Flink Catalog" >}}
+
+{{< tab "Catalog" >}}
+
 ```sql
 -- if you're trying out Paimon in a distributed environment,
 -- the warehouse path should be set to a shared file system, such as HDFS or OSS
@@ -141,6 +143,42 @@ CREATE TABLE word_count (
     cnt BIGINT
 );
 ```
+
+{{< /tab >}}
+
+{{< tab "Generic-Catalog" >}}
+
+Using FlinkGenericCatalog, you need to use Hive metastore. Then, you can use all the tables from Paimon, Hive, and
+Flink Generic Tables (Kafka and other tables)!
+
+In this mode, you should use 'connector' option for creating tables.
+
+{{< hint info >}}
+Paimon will use `hive.metastore.warehouse.dir` in your `hive-site.xml`, please use path with scheme.
+For example, `hdfs://...`. Otherwise, Paimon will use the local path.
+{{< /hint >}}
+
+```sql
+CREATE CATALOG my_catalog WITH (
+    'type'='paimon-generic',
+    'hive-conf-dir'='...',
+    'hadoop-conf-dir'='...'
+);
+
+USE CATALOG my_catalog;
+
+-- create a word count table
+CREATE TABLE word_count (
+    word STRING PRIMARY KEY NOT ENFORCED,
+    cnt BIGINT
+) WITH (
+    'connector'='paimon'
+);
+```
+
+{{< /tab >}}
+
+{{< /tabs >}}
 
 **Step 6: Write Data**
 
@@ -205,7 +243,18 @@ Stop the Flink local cluster.
 ./bin/stop-cluster.sh
 ```
 
-### Using Action Jar
+## Savepoint and recover
+
+Because Paimon has its own snapshot management, this may conflict with Flink's checkpoint management, causing
+exceptions when restoring from savepoint (don't worry, it will not cause the storage to be damaged).
+
+It is recommended that you use the following methods to savepoint:
+1. Use [Stop with savepoint](https://nightlies.apache.org/flink/flink-docs-stable/docs/ops/state/savepoints/#stopping-a-job-with-savepoint).
+2. Use [Tag with savepoint]({{< ref "maintenance/manage-tags#work-with-flink-savepoint" >}}), and rollback-to-tag
+   before restoring from savepoint.
+
+## Using Action Jar
+
 After the Flink Local Cluster has been started, you can execute the action jar by using the following command
 
 ```
@@ -227,7 +276,7 @@ The following command will used to compact a table
 
 ## Supported Flink Data Type
 
-See [Flink Data Types](https://nightlies.apache.org/flink/flink-docs-release-1.16/docs/dev/table/types/).
+See [Flink Data Types](https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/table/types/).
 
 All Flink data types are supported, except that
 
@@ -235,6 +284,7 @@ All Flink data types are supported, except that
 * `MAP` is not supported as primary keys.
 
 ## Use Flink Managed Memory
+
 Paimon tasks can create memory pools based on executor memory which will be managed by Flink executor, such as managed memory in Flink task manager. It will improve the stability and performance of sinks by managing writer buffers for multiple tasks through executor.
 
 The following properties can be set if using Flink managed memory:

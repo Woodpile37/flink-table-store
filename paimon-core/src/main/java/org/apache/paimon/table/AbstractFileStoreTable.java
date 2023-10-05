@@ -264,7 +264,8 @@ public abstract class AbstractFileStoreTable implements FileStoreTable {
                 coreOptions().writeOnly() ? null : store().newTagCreationManager(),
                 catalogEnvironment.lockFactory().create(),
                 CoreOptions.fromMap(options()).consumerExpireTime(),
-                new ConsumerManager(fileIO, path));
+                new ConsumerManager(fileIO, path),
+                coreOptions().snapshotExpireExecutionMode());
     }
 
     private List<CommitCallback> createCommitCallbacks() {
@@ -448,7 +449,8 @@ public abstract class AbstractFileStoreTable implements FileStoreTable {
         }
     }
 
-    private TagManager tagManager() {
+    @Override
+    public TagManager tagManager() {
         return new TagManager(fileIO, path);
     }
 

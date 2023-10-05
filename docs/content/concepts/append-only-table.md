@@ -27,7 +27,7 @@ under the License.
 # Append Only Table
 
 If a table does not have a primary key defined, it is an append-only table by default. Separated by the definition of bucket,
-we have two different append-only mode: "Append For Queue" and "Append For Scalable Table". 
+we have two different append-only mode: "Append For Queue" and "Append For Scalable Table".
 
 ## Append For Queue
 
@@ -117,7 +117,7 @@ SELECT window_start, window_end, COUNT(`user`) FROM TABLE(
  TUMBLE(TABLE T, DESCRIPTOR(order_time), INTERVAL '10' MINUTES)) GROUP BY window_start, window_end;
 ```
 
-You can also enable [Flink Watermark alignment](https://nightlies.apache.org/flink/flink-docs-master/docs/dev/datastream/event-time/generating_watermarks/#watermark-alignment-_beta_),
+You can also enable [Flink Watermark alignment](https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/datastream/event-time/generating_watermarks/#watermark-alignment-_beta_),
 which will make sure no sources/splits/shards/partitions increase their watermarks too far ahead of the rest:
 
 <table class="configuration table table-bordered">
@@ -207,8 +207,9 @@ although we can stream read and write still). All the records will go into one d
 and we do not maintain the order anymore. As we don't have the concept of bucket, we will not shuffle the input records by bucket anymore,
 which will speed up the inserting.
 
-{{< img src="/img/for-scalable.png">}}
+Using this mode, you can replace your Hive table to lake table.
 
+{{< img src="/img/for-scalable.png">}}
 
 ### Compaction
 
@@ -226,6 +227,27 @@ behavior is exactly the same as [Append For Qeueue]({{< ref "#compaction" >}}). 
 
 The auto compaction is only supported in Flink engine streaming mode. You can also start a compaction job in flink by flink action in paimon
 and disable all the other compaction by set `write-only`.
+
+### Sort Compact
+
+The data in a per-partition out of order will lead a slow select, compaction may slow down the inserting. It is a good choice for you to set 
+write-only for inserting job, and after per-partition data done, trigger a partition `Sort Compact` action. 
+
+You can trigger action by shell script:
+```shell
+<FLINK_HOME>/bin/flink run \
+    /path/to/paimon-flink-action-{{< version >}}.jar \
+    compact \
+    --warehouse hdfs:///path/to/warehouse \
+    --database test_db \
+    --table <tableName> \
+    --order-strategy <orderType> \
+    --order-by <col1,col2,...>
+```
+
+{{< generated/sort-compact >}}
+
+Other config is the same as [Compact Table]({{< ref "concepts/file-operations#compact-table" >}})
 
 ### Streaming Source
 
@@ -255,3 +277,14 @@ CREATE TABLE MyTable (
 {{< /tab >}}
 
 {{< /tabs >}}
+
+## Multiple Partitions Write
+
+While writing multiple partitions in a single insert job, we may get an out-of-memory error if
+too many records arrived between two checkpoint.
+
+You can `write-buffer-for-append` option for append-only table. Setting this parameter to true, writer will cache
+the records use Segment Pool to avoid OOM.
+
+You can also set `write-buffer-spillable` to true, writer can spill the records to disk. This can reduce small
+files as much as possible.
