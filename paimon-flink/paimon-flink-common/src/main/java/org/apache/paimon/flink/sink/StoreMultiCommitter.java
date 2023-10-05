@@ -18,6 +18,7 @@
 
 package org.apache.paimon.flink.sink;
 
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.manifest.ManifestCommittable;
@@ -26,11 +27,13 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.CommitMessage;
 
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.metrics.groups.OperatorIOMetricGroup;
+
+import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,15 +49,31 @@ public class StoreMultiCommitter
 
     private final Catalog catalog;
     private final String commitUser;
+    @Nullable private final CommitterMetrics metrics;
+
     // To make the commit behavior consistent with that of Committer,
     //    StoreMultiCommitter manages multiple committers which are
     //    referenced by table id.
     private final Map<Identifier, StoreCommitter> tableCommitters;
 
-    public StoreMultiCommitter(String commitUser, Catalog.Loader catalogLoader) {
+    // compact job needs set "write-only" of a table to false
+    private final boolean isCompactJob;
+
+    public StoreMultiCommitter(
+            Catalog.Loader catalogLoader, String commitUser, @Nullable CommitterMetrics metrics) {
+        this(catalogLoader, commitUser, metrics, false);
+    }
+
+    public StoreMultiCommitter(
+            Catalog.Loader catalogLoader,
+            String commitUser,
+            @Nullable CommitterMetrics metrics,
+            boolean isCompactJob) {
         this.catalog = catalogLoader.load();
         this.commitUser = commitUser;
+        this.metrics = metrics;
         this.tableCommitters = new HashMap<>();
+        this.isCompactJob = isCompactJob;
     }
 
     @Override
@@ -85,8 +104,7 @@ public class StoreMultiCommitter
     }
 
     @Override
-    public void commit(
-            List<WrappedManifestCommittable> committables, OperatorIOMetricGroup metricGroup)
+    public void commit(List<WrappedManifestCommittable> committables)
             throws IOException, InterruptedException {
 
         // key by table id
@@ -96,7 +114,7 @@ public class StoreMultiCommitter
             Identifier tableId = entry.getKey();
             List<ManifestCommittable> committableList = entry.getValue();
             StoreCommitter committer = getStoreCommitter(tableId);
-            committer.commit(committableList, metricGroup);
+            committer.commit(committableList);
         }
     }
 
@@ -143,13 +161,21 @@ public class StoreMultiCommitter
             FileStoreTable table;
             try {
                 table = (FileStoreTable) catalog.getTable(tableId);
+                if (isCompactJob) {
+                    table =
+                            table.copy(
+                                    Collections.singletonMap(
+                                            CoreOptions.WRITE_ONLY.key(), "false"));
+                }
             } catch (Catalog.TableNotExistException e) {
                 throw new RuntimeException(
                         String.format(
                                 "Failed to get committer for table %s", tableId.getFullName()),
                         e);
             }
-            committer = new StoreCommitter(table.newCommit(commitUser).ignoreEmptyCommit(false));
+            committer =
+                    new StoreCommitter(
+                            table.newCommit(commitUser).ignoreEmptyCommit(isCompactJob), metrics);
             tableCommitters.put(tableId, committer);
         }
 

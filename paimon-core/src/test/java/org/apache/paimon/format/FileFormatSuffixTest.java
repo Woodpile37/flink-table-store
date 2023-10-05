@@ -23,12 +23,14 @@ import org.apache.paimon.append.AppendOnlyCompactManager;
 import org.apache.paimon.append.AppendOnlyWriter;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.io.DataFilePathFactory;
 import org.apache.paimon.io.KeyValueFileReadWriteTest;
 import org.apache.paimon.io.KeyValueFileWriterFactory;
+import org.apache.paimon.memory.HeapMemorySegmentPool;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.IntType;
@@ -64,22 +66,27 @@ public class FileFormatSuffixTest extends KeyValueFileReadWriteTest {
                 new DataFilePathFactory(new Path(tempDir.toString()), "dt=1", 1, format);
         FileFormat fileFormat = FileFormat.fromIdentifier(format, new Options());
         LinkedList<DataFileMeta> toCompact = new LinkedList<>();
+        CoreOptions options = new CoreOptions(new HashMap<>());
         AppendOnlyWriter appendOnlyWriter =
                 new AppendOnlyWriter(
                         LocalFileIO.create(),
+                        IOManager.create(tempDir.toString()),
                         0,
                         fileFormat,
                         10,
                         SCHEMA,
                         0,
-                        new AppendOnlyCompactManager(
-                                null, toCompact, 4, 10, 10, null, false), // not used
+                        new AppendOnlyCompactManager(null, toCompact, 4, 10, 10, null), // not used
                         false,
                         dataFilePathFactory,
                         null,
+                        false,
+                        false,
                         CoreOptions.FILE_COMPRESSION.defaultValue(),
                         StatsCollectorFactories.createStatsFactories(
-                                new CoreOptions(new HashMap<>()), SCHEMA.getFieldNames()));
+                                options, SCHEMA.getFieldNames()));
+        appendOnlyWriter.setMemoryPool(
+                new HeapMemorySegmentPool(options.writeBufferSize(), options.pageSize()));
         appendOnlyWriter.write(
                 GenericRow.of(1, BinaryString.fromString("aaa"), BinaryString.fromString("1")));
         CommitIncrement increment = appendOnlyWriter.prepareCommit(true);

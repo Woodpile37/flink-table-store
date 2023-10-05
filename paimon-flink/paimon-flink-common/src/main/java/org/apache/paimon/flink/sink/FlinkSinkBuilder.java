@@ -18,6 +18,7 @@
 
 package org.apache.paimon.flink.sink;
 
+import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.flink.sink.index.GlobalDynamicBucketSink;
 import org.apache.paimon.table.AppendOnlyFileStoreTable;
 import org.apache.paimon.table.BucketMode;
@@ -53,7 +54,16 @@ public class FlinkSinkBuilder {
         return this;
     }
 
-    public FlinkSinkBuilder withOverwritePartition(Map<String, String> overwritePartition) {
+    /**
+     * Whether we need to overwrite partitions.
+     *
+     * @param overwritePartition If we pass null, it means not overwrite. If we pass an empty map,
+     *     it means to overwrite every partition it received. If we pass a non-empty map, it means
+     *     we only overwrite the partitions match the map.
+     * @return returns this.
+     */
+    public FlinkSinkBuilder withOverwritePartition(
+            @Nullable Map<String, String> overwritePartition) {
         this.overwritePartition = overwritePartition;
         return this;
     }
@@ -69,30 +79,42 @@ public class FlinkSinkBuilder {
     }
 
     public DataStreamSink<?> build() {
+        DataStream<InternalRow> input = MapToInternalRow.map(this.input, table.rowType());
+        if (table.coreOptions().localMergeEnabled() && table.schema().primaryKeys().size() > 0) {
+            input =
+                    input.forward()
+                            .transform(
+                                    "local merge",
+                                    input.getType(),
+                                    new LocalMergeOperator(table.schema()))
+                            .setParallelism(input.getParallelism());
+        }
+
         BucketMode bucketMode = table.bucketMode();
         switch (bucketMode) {
             case FIXED:
-                return buildForFixedBucket();
+                return buildForFixedBucket(input);
             case DYNAMIC:
-                return buildDynamicBucketSink(false);
+                return buildDynamicBucketSink(input, false);
             case GLOBAL_DYNAMIC:
-                return buildDynamicBucketSink(true);
+                return buildDynamicBucketSink(input, true);
             case UNAWARE:
-                return buildUnawareBucketSink();
+                return buildUnawareBucketSink(input);
             default:
                 throw new UnsupportedOperationException("Unsupported bucket mode: " + bucketMode);
         }
     }
 
-    private DataStreamSink<?> buildDynamicBucketSink(boolean globalIndex) {
+    private DataStreamSink<?> buildDynamicBucketSink(
+            DataStream<InternalRow> input, boolean globalIndex) {
         checkArgument(logSinkFunction == null, "Dynamic bucket mode can not work with log system.");
         return globalIndex
                 ? new GlobalDynamicBucketSink(table, overwritePartition).build(input, parallelism)
                 : new RowDynamicBucketSink(table, overwritePartition).build(input, parallelism);
     }
 
-    private DataStreamSink<?> buildForFixedBucket() {
-        DataStream<RowData> partitioned =
+    private DataStreamSink<?> buildForFixedBucket(DataStream<InternalRow> input) {
+        DataStream<InternalRow> partitioned =
                 partition(
                         input,
                         new RowDataChannelComputer(table.schema(), logSinkFunction != null),
@@ -101,7 +123,7 @@ public class FlinkSinkBuilder {
         return sink.sinkFrom(partitioned);
     }
 
-    private DataStreamSink<?> buildUnawareBucketSink() {
+    private DataStreamSink<?> buildUnawareBucketSink(DataStream<InternalRow> input) {
         checkArgument(
                 table instanceof AppendOnlyFileStoreTable,
                 "Unaware bucket mode only works with append-only table for now.");

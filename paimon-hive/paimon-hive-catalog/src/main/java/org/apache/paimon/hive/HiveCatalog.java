@@ -97,7 +97,8 @@ public class HiveCatalog extends AbstractCatalog {
     private static final String SERDE_CLASS_NAME = "org.apache.paimon.hive.PaimonSerDe";
     private static final String STORAGE_HANDLER_CLASS_NAME =
             "org.apache.paimon.hive.PaimonStorageHandler";
-
+    private static final String HIVE_PREFIX = "hive.";
+    private static final int HIVE_PREFIX_LENGTH = HIVE_PREFIX.length();
     public static final String HIVE_SITE_FILE = "hive-site.xml";
 
     private final HiveConf hiveConf;
@@ -321,10 +322,20 @@ public class HiveCatalog extends AbstractCatalog {
             throw new RuntimeException(
                     "Failed to commit changes of table "
                             + identifier.getFullName()
-                            + " to underlying files",
+                            + " to underlying files.",
                     e);
         }
-        Table table = newHmsTable(identifier);
+        Table table =
+                newHmsTable(
+                        identifier,
+                        tableSchema.options().entrySet().stream()
+                                .filter(entry -> entry.getKey().startsWith(HIVE_PREFIX))
+                                .collect(
+                                        Collectors.toMap(
+                                                entry ->
+                                                        entry.getKey()
+                                                                .substring(HIVE_PREFIX_LENGTH),
+                                                Map.Entry::getValue)));
         try {
             updateHmsTable(table, identifier, tableSchema);
             client.createTable(table);
@@ -364,6 +375,26 @@ public class HiveCatalog extends AbstractCatalog {
             table.setDbName(toTable.getDatabaseName());
             table.setTableName(toTable.getObjectName());
             client.alter_table(fromDB, fromTableName, table);
+
+            Path fromPath = getDataTableLocation(fromTable);
+            if (new SchemaManager(fileIO, fromPath).listAllIds().size() > 0) {
+                // Rename the file system's table directory. Maintain consistency between tables in
+                // the file system and tables in the Hive Metastore.
+                Path toPath = getDataTableLocation(toTable);
+                try {
+                    fileIO.rename(fromPath, toPath);
+                } catch (IOException e) {
+                    throw new RuntimeException(
+                            "Failed to rename changes of table "
+                                    + toTable.getFullName()
+                                    + " to underlying files.",
+                            e);
+                }
+
+                // update location
+                locationHelper.specifyTableLocation(table, toPath.toString());
+                client.alter_table(toTable.getDatabaseName(), toTable.getObjectName(), table);
+            }
         } catch (TException e) {
             throw new RuntimeException("Failed to rename table " + fromTable.getFullName(), e);
         }
@@ -410,7 +441,7 @@ public class HiveCatalog extends AbstractCatalog {
     }
 
     @Override
-    protected String warehouse() {
+    public String warehouse() {
         return warehouse;
     }
 
@@ -462,7 +493,7 @@ public class HiveCatalog extends AbstractCatalog {
         return database;
     }
 
-    private Table newHmsTable(Identifier identifier) {
+    private Table newHmsTable(Identifier identifier, Map<String, String> tableParameters) {
         long currentTimeMillis = System.currentTimeMillis();
         TableType tableType =
                 OptionsUtils.convertToEnum(
@@ -479,7 +510,7 @@ public class HiveCatalog extends AbstractCatalog {
                         Integer.MAX_VALUE,
                         null,
                         Collections.emptyList(),
-                        new HashMap<>(),
+                        tableParameters,
                         null,
                         null,
                         tableType.toString().toUpperCase(Locale.ROOT) + "_TABLE");
@@ -640,6 +671,14 @@ public class HiveCatalog extends AbstractCatalog {
 
     public static HiveConf createHiveConf(
             @Nullable String hiveConfDir, @Nullable String hadoopConfDir) {
+        // try to load from system env.
+        if (isNullOrWhitespaceOnly(hiveConfDir)) {
+            hiveConfDir = possibleHiveConfPath();
+        }
+        if (isNullOrWhitespaceOnly(hadoopConfDir)) {
+            hadoopConfDir = possibleHadoopConfPath();
+        }
+
         // create HiveConf from hadoop configuration with hadoop conf directory configured.
         Configuration hadoopConf = null;
         if (!isNullOrWhitespaceOnly(hadoopConfDir)) {
@@ -730,5 +769,25 @@ public class HiveCatalog extends AbstractCatalog {
             }
         }
         return null;
+    }
+
+    public static String possibleHadoopConfPath() {
+        String possiblePath = null;
+        if (System.getenv("HADOOP_CONF_DIR") != null) {
+            possiblePath = System.getenv("HADOOP_CONF_DIR");
+        } else if (System.getenv("HADOOP_HOME") != null) {
+            String possiblePath1 = System.getenv("HADOOP_HOME") + "/conf";
+            String possiblePath2 = System.getenv("HADOOP_HOME") + "/etc/hadoop";
+            if (new File(possiblePath1).exists()) {
+                possiblePath = possiblePath1;
+            } else if (new File(possiblePath2).exists()) {
+                possiblePath = possiblePath2;
+            }
+        }
+        return possiblePath;
+    }
+
+    public static String possibleHiveConfPath() {
+        return System.getenv("HIVE_CONF_DIR");
     }
 }

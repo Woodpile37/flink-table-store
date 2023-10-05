@@ -31,8 +31,10 @@ import org.apache.paimon.table.source.snapshot.DeltaFollowUpScanner;
 import org.apache.paimon.table.source.snapshot.FollowUpScanner;
 import org.apache.paimon.table.source.snapshot.InputChangelogFollowUpScanner;
 import org.apache.paimon.table.source.snapshot.SnapshotReader;
+import org.apache.paimon.table.source.snapshot.StartingContext;
 import org.apache.paimon.table.source.snapshot.StartingScanner;
 import org.apache.paimon.table.source.snapshot.StartingScanner.ScannedResult;
+import org.apache.paimon.table.source.snapshot.StaticFromSnapshotStartingScanner;
 import org.apache.paimon.utils.SnapshotManager;
 
 import org.slf4j.Logger;
@@ -51,9 +53,11 @@ public class InnerStreamTableScanImpl extends AbstractInnerTableScan
     private final boolean supportStreamingReadOverwrite;
     private final DefaultValueAssigner defaultValueAssigner;
 
+    private boolean initialized = false;
     private StartingScanner startingScanner;
     private FollowUpScanner followUpScanner;
     private BoundedChecker boundedChecker;
+
     private boolean isFullPhaseEnd = false;
     @Nullable private Long currentWatermark;
     @Nullable private Long nextSnapshotId;
@@ -78,15 +82,17 @@ public class InnerStreamTableScanImpl extends AbstractInnerTableScan
     }
 
     @Override
+    public StartingContext startingContext() {
+        if (!initialized) {
+            initScanner();
+        }
+        return startingScanner.startingContext();
+    }
+
+    @Override
     public Plan plan() {
-        if (startingScanner == null) {
-            startingScanner = createStartingScanner(true);
-        }
-        if (followUpScanner == null) {
-            followUpScanner = createFollowUpScanner();
-        }
-        if (boundedChecker == null) {
-            boundedChecker = createBoundedChecker();
+        if (!initialized) {
+            initScanner();
         }
 
         if (nextSnapshotId == null) {
@@ -96,8 +102,21 @@ public class InnerStreamTableScanImpl extends AbstractInnerTableScan
         }
     }
 
+    private void initScanner() {
+        if (startingScanner == null) {
+            startingScanner = createStartingScanner(true);
+        }
+        if (followUpScanner == null) {
+            followUpScanner = createFollowUpScanner();
+        }
+        if (boundedChecker == null) {
+            boundedChecker = createBoundedChecker();
+        }
+        initialized = true;
+    }
+
     private Plan tryFirstPlan() {
-        StartingScanner.Result result = startingScanner.scan(snapshotManager, snapshotReader);
+        StartingScanner.Result result = startingScanner.scan(snapshotReader);
         if (result instanceof ScannedResult) {
             ScannedResult scannedResult = (ScannedResult) result;
             currentWatermark = scannedResult.currentWatermark();
@@ -105,7 +124,7 @@ public class InnerStreamTableScanImpl extends AbstractInnerTableScan
             nextSnapshotId = currentSnapshotId + 1;
             isFullPhaseEnd =
                     boundedChecker.shouldEndInput(snapshotManager.snapshot(currentSnapshotId));
-            return DataFilePlan.fromResult(result);
+            return scannedResult.plan();
         } else if (result instanceof StartingScanner.NextSnapshot) {
             nextSnapshotId = ((StartingScanner.NextSnapshot) result).nextSnapshotId();
             isFullPhaseEnd =
@@ -227,6 +246,17 @@ public class InnerStreamTableScanImpl extends AbstractInnerTableScan
     @Override
     public void restore(@Nullable Long nextSnapshotId) {
         this.nextSnapshotId = nextSnapshotId;
+    }
+
+    @Override
+    public void restore(@Nullable Long nextSnapshotId, boolean scanAllSnapshot) {
+        if (nextSnapshotId != null && scanAllSnapshot) {
+            startingScanner =
+                    new StaticFromSnapshotStartingScanner(snapshotManager, nextSnapshotId);
+            restore(null);
+        } else {
+            restore(nextSnapshotId);
+        }
     }
 
     @Override

@@ -20,26 +20,31 @@ package org.apache.paimon.table.source.snapshot;
 
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
-import org.apache.paimon.operation.ScanKind;
+import org.apache.paimon.table.source.ScanMode;
 import org.apache.paimon.utils.SnapshotManager;
 import org.apache.paimon.utils.TagManager;
 
 /** {@link StartingScanner} for the {@link CoreOptions#SCAN_TAG_NAME} of a batch read. */
-public class StaticFromTagStartingScanner implements StartingScanner {
+public class StaticFromTagStartingScanner extends AbstractStartingScanner {
 
     private final String tagName;
 
-    public StaticFromTagStartingScanner(String tagName) {
+    public StaticFromTagStartingScanner(SnapshotManager snapshotManager, String tagName) {
+        super(snapshotManager);
         this.tagName = tagName;
     }
 
     @Override
-    public Result scan(SnapshotManager snapshotManager, SnapshotReader snapshotReader) {
+    public ScanMode startingScanMode() {
+        return ScanMode.ALL;
+    }
+
+    @Override
+    public Result scan(SnapshotReader snapshotReader) {
         TagManager tagManager =
                 new TagManager(snapshotManager.fileIO(), snapshotManager.tablePath());
         Snapshot snapshot = tagManager.taggedSnapshot(tagName);
-
         return StartingScanner.fromPlan(
-                snapshotReader.withKind(ScanKind.ALL).withSnapshot(snapshot).read());
+                snapshotReader.withMode(ScanMode.ALL).withSnapshot(snapshot).read());
     }
 }
