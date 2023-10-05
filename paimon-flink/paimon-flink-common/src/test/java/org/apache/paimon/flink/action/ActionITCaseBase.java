@@ -35,16 +35,26 @@ import org.apache.paimon.table.sink.StreamTableWrite;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.source.TableRead;
 import org.apache.paimon.types.RowType;
-import org.apache.paimon.utils.SnapshotManager;
 
+import org.apache.flink.api.common.RuntimeExecutionMode;
+import org.apache.flink.api.common.restartstrategy.RestartStrategies;
+import org.apache.flink.streaming.api.CheckpointingMode;
+import org.apache.flink.streaming.api.environment.ExecutionCheckpointingOptions;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.EnvironmentSettings;
+import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.api.config.TableConfigOptions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 /** {@link Action} test base. */
 public abstract class ActionITCaseBase extends AbstractTestBase {
@@ -53,11 +63,9 @@ public abstract class ActionITCaseBase extends AbstractTestBase {
     protected String database;
     protected String tableName;
     protected String commitUser;
-
-    protected SnapshotManager snapshotManager;
     protected StreamTableWrite write;
     protected StreamTableCommit commit;
-
+    protected Catalog catalog;
     private long incrementalIdentifier;
 
     @BeforeEach
@@ -67,16 +75,20 @@ public abstract class ActionITCaseBase extends AbstractTestBase {
         tableName = "test_table_" + UUID.randomUUID();
         commitUser = UUID.randomUUID().toString();
         incrementalIdentifier = 0;
+        catalog = CatalogFactory.createCatalog(CatalogContext.create(new Path(warehouse)));
     }
 
     @AfterEach
     public void after() throws Exception {
         if (write != null) {
             write.close();
+            write = null;
         }
         if (commit != null) {
             commit.close();
+            commit = null;
         }
+        catalog.close();
     }
 
     protected FileStoreTable createFileStoreTable(
@@ -85,13 +97,27 @@ public abstract class ActionITCaseBase extends AbstractTestBase {
             List<String> primaryKeys,
             Map<String, String> options)
             throws Exception {
-        Catalog catalog = catalog();
+        return createFileStoreTable(tableName, rowType, partitionKeys, primaryKeys, options);
+    }
+
+    protected FileStoreTable createFileStoreTable(
+            String tableName,
+            RowType rowType,
+            List<String> partitionKeys,
+            List<String> primaryKeys,
+            Map<String, String> options)
+            throws Exception {
         Identifier identifier = Identifier.create(database, tableName);
         catalog.createDatabase(database, true);
         catalog.createTable(
                 identifier,
                 new Schema(rowType.getFields(), partitionKeys, primaryKeys, options, ""),
                 false);
+        return (FileStoreTable) catalog.getTable(identifier);
+    }
+
+    protected FileStoreTable getFileStoreTable(String tableName) throws Exception {
+        Identifier identifier = Identifier.create(database, tableName);
         return (FileStoreTable) catalog.getTable(identifier);
     }
 
@@ -109,14 +135,57 @@ public abstract class ActionITCaseBase extends AbstractTestBase {
 
     protected List<String> getResult(TableRead read, List<Split> splits, RowType rowType)
             throws Exception {
-        RecordReader<InternalRow> recordReader = read.createReader(splits);
-        List<String> result = new ArrayList<>();
-        recordReader.forEachRemaining(
-                row -> result.add(DataFormatTestUtil.internalRowToString(row, rowType)));
-        return result;
+        try (RecordReader<InternalRow> recordReader = read.createReader(splits)) {
+            List<String> result = new ArrayList<>();
+            recordReader.forEachRemaining(
+                    row -> result.add(DataFormatTestUtil.internalRowToString(row, rowType)));
+            return result;
+        }
     }
 
-    protected Catalog catalog() {
-        return CatalogFactory.createCatalog(CatalogContext.create(new Path(warehouse)));
+    protected StreamExecutionEnvironment buildDefaultEnv(boolean isStreaming) {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.getConfig().setRestartStrategy(RestartStrategies.noRestart());
+        env.setParallelism(ThreadLocalRandom.current().nextInt(2) + 1);
+
+        if (isStreaming) {
+            env.setRuntimeMode(RuntimeExecutionMode.STREAMING);
+            env.getCheckpointConfig().setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
+            env.getCheckpointConfig().setCheckpointInterval(500);
+        } else {
+            env.setRuntimeMode(RuntimeExecutionMode.BATCH);
+        }
+
+        return env;
+    }
+
+    protected void callProcedure(String procedureStatement) {
+        // default execution mode
+        callProcedure(procedureStatement, true, false);
+    }
+
+    protected void callProcedure(String procedureStatement, boolean isStreaming, boolean dmlSync) {
+        StreamExecutionEnvironment env = buildDefaultEnv(isStreaming);
+
+        TableEnvironment tEnv;
+        if (isStreaming) {
+            tEnv = StreamTableEnvironment.create(env, EnvironmentSettings.inStreamingMode());
+            tEnv.getConfig()
+                    .set(
+                            ExecutionCheckpointingOptions.CHECKPOINTING_INTERVAL,
+                            Duration.ofMillis(500));
+        } else {
+            tEnv = StreamTableEnvironment.create(env, EnvironmentSettings.inBatchMode());
+        }
+
+        tEnv.getConfig().set(TableConfigOptions.TABLE_DML_SYNC, dmlSync);
+
+        tEnv.executeSql(
+                String.format(
+                        "CREATE CATALOG PAIMON WITH ('type'='paimon', 'warehouse'='%s');",
+                        warehouse));
+        tEnv.useCatalog("PAIMON");
+
+        tEnv.executeSql(procedureStatement);
     }
 }

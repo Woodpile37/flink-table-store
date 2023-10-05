@@ -31,7 +31,7 @@ under the License.
     <artifactId>paimon-parent</artifactId>
     <groupId>org.apache.paimon</groupId>
     <name>Paimon : </name>
-    <version>0.5-SNAPSHOT</version>
+    <version>0.6-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <url>https://paimon.apache.org</url>
@@ -295,6 +295,24 @@ under the License.
                 </plugins>
             </build>
         </profile>
+
+        <!-- Activate these profiles with -Pflink-x.xx to build and test against different Flink versions -->
+        <profile>
+            <id>flink-1.14</id>
+            <properties>
+                <flink.version>1.16.1</flink.version>
+                <flink.runtime>flink-runtime_${scala.binary.version}</flink.runtime>
+                <flink.table.api.java.bridge>flink-table-api-java-bridge_${scala.binary.version}</flink.table.api.java.bridge>
+                <flink.table.runtime>flink-table-runtime_${scala.binary.version}</flink.table.runtime>
+                <flink.streaming.java>flink-streaming-java_${scala.binary.version}</flink.streaming.java>
+                <flink.sql.orc>flink-sql-orc_${scala.binary.version}</flink.sql.orc>
+                <flink.orc>flink-orc_${scala.binary.version}</flink.orc>
+                <flink.connector.kafka>flink-connector-kafka_${scala.binary.version}</flink.connector.kafka>
+                <flink.sql.connector.kafka>flink-sql-connector-kafka_${scala.binary.version}</flink.sql.connector.kafka>
+                <flink.test.utils>flink-test-utils_${scala.binary.version}</flink.test.utils>
+                <flink.sql.parquet>flink-sql-parquet_${scala.binary.version}</flink.sql.parquet>
+            </properties>
+        </profile>
     </profiles>
 
     <build>
@@ -305,11 +323,34 @@ under the License.
                 <version>2.4</version><!--$NO-MVN-MAN-VER$-->
                 <configuration>
                     <archive>
+                        <manifestEntries>
+                            <SCM-Revision>${git.commit.id}</SCM-Revision>
+                            <SCM-Branch>${git.branch}</SCM-Branch>
+                        </manifestEntries>
                         <manifest>
                             <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
                             <addDefaultSpecificationEntries>true</addDefaultSpecificationEntries>
                         </manifest>
                     </archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>pl.project13.maven</groupId>
+                <artifactId>git-commit-id-plugin</artifactId>
+                <version>4.0.0</version>
+                <executions>
+                    <execution>
+                        <id>get-the-git-infos</id>
+                        <goals>
+                            <goal>revision</goal>
+                        </goals>
+                        <phase>validate</phase>
+                    </execution>
+                </executions>
+                <configuration>
+                    <dotGitDirectory>${project.basedir}/.git</dotGitDirectory>
+                    <failOnNoGitDirectory>false</failOnNoGitDirectory>
+                    <failOnUnableToExtractRepoInfo>false</failOnUnableToExtractRepoInfo>
                 </configuration>
             </plugin>
 
@@ -413,6 +454,7 @@ under the License.
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.0.0-M5</version>
                 <configuration>
+                    <useSystemClassLoader>false</useSystemClassLoader>
                     <forkCount>${flink.forkCount}</forkCount>
                     <reuseForks>${flink.reuseForks}</reuseForks>
                     <trimStackTrace>false</trimStackTrace>

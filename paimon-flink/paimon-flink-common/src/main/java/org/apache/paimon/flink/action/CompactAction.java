@@ -70,6 +70,7 @@ public class CompactAction extends TableActionBase {
         return this;
     }
 
+    @Override
     public void build(StreamExecutionEnvironment env) {
         ReadableConfig conf = StreamExecutionEnvironmentUtils.getConfiguration(env);
         boolean isStreaming =
@@ -118,5 +119,9 @@ public class CompactAction extends TableActionBase {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         build(env);
         execute(env, "Compact job");
+    }
+
+    public List<Map<String, String>> getPartitions() {
+        return partitions;
     }
 }

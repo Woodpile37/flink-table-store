@@ -25,15 +25,11 @@ under the License.
     <parent>
         <artifactId>paimon-parent</artifactId>
         <groupId>org.apache.paimon</groupId>
-        <version>0.5-SNAPSHOT</version>
+        <version>0.6-SNAPSHOT</version>
     </parent>
 
     <artifactId>paimon-common</artifactId>
     <name>Paimon : Common</name>
-
-    <properties>
-        <antlr4.version>4.7</antlr4.version>
-    </properties>
 
     <dependencies>
         <dependency>
@@ -287,6 +283,7 @@ under the License.
                                     <shadedPattern>org.apache.paimon.shade.it.unimi.dsi.fastutil</shadedPattern>
                                 </relocation>
                             </relocations>
+                            <minimizeJar>true</minimizeJar>
                         </configuration>
                     </execution>
                 </executions>

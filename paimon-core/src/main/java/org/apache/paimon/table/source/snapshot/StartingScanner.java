@@ -20,7 +20,6 @@ package org.apache.paimon.table.source.snapshot;
 
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.TableScan;
-import org.apache.paimon.utils.SnapshotManager;
 
 import javax.annotation.Nullable;
 
@@ -29,7 +28,9 @@ import java.util.List;
 /** Helper class for the first planning of {@link TableScan}. */
 public interface StartingScanner {
 
-    Result scan(SnapshotManager snapshotManager, SnapshotReader snapshotReader);
+    StartingContext startingContext();
+
+    Result scan(SnapshotReader snapshotReader);
 
     /** Scan result of {@link #scan}. */
     interface Result {}
@@ -38,33 +39,33 @@ public interface StartingScanner {
     class NoSnapshot implements Result {}
 
     static ScannedResult fromPlan(SnapshotReader.Plan plan) {
-        return new ScannedResult(plan.snapshotId(), plan.watermark(), (List) plan.splits());
+        return new ScannedResult(plan);
     }
 
     /** Result with scanned snapshot. Next snapshot should be the current snapshot plus 1. */
     class ScannedResult implements Result {
-        private final long currentSnapshotId;
-        @Nullable private final Long currentWatermark;
-        private final List<DataSplit> splits;
 
-        public ScannedResult(
-                long currentSnapshotId, @Nullable Long currentWatermark, List<DataSplit> splits) {
-            this.currentSnapshotId = currentSnapshotId;
-            this.currentWatermark = currentWatermark;
-            this.splits = splits;
+        private final SnapshotReader.Plan plan;
+
+        public ScannedResult(SnapshotReader.Plan plan) {
+            this.plan = plan;
         }
 
         public long currentSnapshotId() {
-            return currentSnapshotId;
+            return plan.snapshotId();
         }
 
         @Nullable
         public Long currentWatermark() {
-            return currentWatermark;
+            return plan.watermark();
         }
 
         public List<DataSplit> splits() {
-            return splits;
+            return (List) plan.splits();
+        }
+
+        public SnapshotReader.Plan plan() {
+            return plan;
         }
     }
 

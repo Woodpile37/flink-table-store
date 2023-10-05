@@ -393,7 +393,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                 Collections.emptyList(),
                 commitIdentifier,
                 null,
-                Collections.emptyMap());
+                new HashMap<>());
     }
 
     @Override
@@ -640,8 +640,12 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                             partitionType));
             previousChangesListName = manifestList.write(newMetas);
 
+            // the added records subtract the deleted records from
+            long deltaRecordCount =
+                    Snapshot.recordCountAdd(tableFiles) - Snapshot.recordCountDelete(tableFiles);
+            long totalRecordCount = previousTotalRecordCount + deltaRecordCount;
+
             // write new changes into manifest files
-            long deltaRecordCount = Snapshot.recordCount(tableFiles);
             List<ManifestFileMeta> newChangesManifests = manifestFile.write(tableFiles);
             newMetas.addAll(newChangesManifests);
             newChangesListName = manifestList.write(newChangesManifests);
@@ -672,7 +676,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                             commitKind,
                             System.currentTimeMillis(),
                             logOffsets,
-                            previousTotalRecordCount + deltaRecordCount,
+                            totalRecordCount,
                             deltaRecordCount,
                             Snapshot.recordCount(changelogFiles),
                             currentWatermark);
@@ -877,7 +881,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                         "2. Multiple jobs are writing into the same partition at the same time "
                                 + "(you'll probably see different base commit user and current commit user below).",
                         "   You can use "
-                                + "https://paimon.apache.org/docs/master/maintenance/multiple-writers/#dedicated-compaction-job "
+                                + "https://paimon.apache.org/docs/master/maintenance/dedicated-compaction#dedicated-compaction-job"
                                 + "to support multiple writing.",
                         "3. You're recovering from an old savepoint, or you're creating multiple jobs from a savepoint.",
                         "   The job will fail continuously in this scenario to protect metadata from corruption.",
